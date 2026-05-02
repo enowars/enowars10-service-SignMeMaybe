@@ -6,3 +6,7 @@ docker-compose.yml
 .dockerignore
 .gitignore
 .env
+src/bin/
+src/obj/
+data/*
+!data/.gitkeep

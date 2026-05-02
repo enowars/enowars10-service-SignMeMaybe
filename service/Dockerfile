@@ -1,24 +1,29 @@
-# Use a suitable base-image.
-FROM python:3-alpine
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
 
-# Create a seperate user and chown new directories if necessary
-RUN addgroup --system service
-RUN adduser --system --ingroup service --uid 1000 service
+COPY src/SignMeMaybe.csproj ./
+RUN dotnet restore SignMeMaybe.csproj
 
-# Create our mapped data volume endpoint
-RUN mkdir /data/
+COPY src/. ./
+RUN dotnet publish SignMeMaybe.csproj -c Release -o /app/publish --no-restore
 
-# Copy our entrypoint.sh and make it executable
-COPY entrypoint.sh /
-RUN chmod +x /entrypoint.sh
 
-# Copy our service
-COPY src/ /service/
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 
-# Change the working directory.
-WORKDIR /service/
-# Expose the service's port
-EXPOSE 8000
+RUN groupadd --system service \
+    && useradd --system --gid service --uid 10001 --create-home service
 
-# Run the service
-ENTRYPOINT ["/entrypoint.sh"]
+RUN mkdir /data && chown service:service /data
+
+WORKDIR /app
+
+COPY --from=build /app/publish ./
+
+ENV ASPNETCORE_URLS=http://0.0.0.0:1984
+ENV ASPNETCORE_ENVIRONMENT=Production
+
+EXPOSE 1984
+
+USER service
+
+ENTRYPOINT ["dotnet", "SignMeMaybe.dll"]
