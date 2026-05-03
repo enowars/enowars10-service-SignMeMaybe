@@ -17,3 +17,7 @@ Thumbs.db
 # Runtime data
 service/data/*
 !service/data/.gitkeep
+
+# temp files
+temp_data_structure.md
+temp_service_design.md

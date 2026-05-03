@@ -30,8 +30,8 @@ from enochecker3.utils import assert_equals, assert_in
 Checker config
 """
 
-SERVICE_PORT = 2323
-checker = Enochecker("n0t3b00k", SERVICE_PORT)
+SERVICE_PORT = 1984
+checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
 
 
