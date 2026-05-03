@@ -10,8 +10,8 @@ RUN dotnet publish SignMeMaybe.csproj -c Release -o /app/publish --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 
-RUN groupadd --system service \
-    && useradd --system --gid service --uid 10001 --create-home service
+RUN groupadd --system --gid 10001 service
+RUN useradd --system --uid 10001 --gid service service
 
 RUN mkdir /data && chown service:service /data
 
@@ -23,7 +23,5 @@ ENV ASPNETCORE_URLS=http://0.0.0.0:1984
 ENV ASPNETCORE_ENVIRONMENT=Production
 
 EXPOSE 1984
-
-USER service
 
 ENTRYPOINT ["dotnet", "SignMeMaybe.dll"]
