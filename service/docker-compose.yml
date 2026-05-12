@@ -12,6 +12,7 @@ services:
 
     environment:
       ASPNETCORE_URLS: "http://0.0.0.0:1984"
+      ASPNETCORE_ENVIRONMENT: "Production"
       SIGNMEMAYBE_DB_PATH: "/data/signmemaybe.sqlite3"
       SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
       SIGNMEMAYBE_EXPORT_ROOT: "/data/exports"
