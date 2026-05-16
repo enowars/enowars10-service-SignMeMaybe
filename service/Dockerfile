@@ -11,7 +11,7 @@ RUN dotnet publish SignMeMaybe.csproj -c Release -o /app/publish --no-restore
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 
 RUN groupadd --system --gid 10001 service
-RUN useradd --system --uid 10001 --gid service service --home-dir /app service
+RUN useradd --system --uid 10001 --gid service --home-dir /app service
 RUN mkdir -p /data /app
 RUN chown -R service:service /data /app
 
