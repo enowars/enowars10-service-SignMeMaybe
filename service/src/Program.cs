@@ -31,6 +31,8 @@ InitializeDatabase(dbPath);
 
 app.MapGet("/", () => "Hello World!\n");
 
+app.MapGet("/service", () => "Hello World!\n");
+
 app.MapGet("/health", () =>
 {
     var response = new
