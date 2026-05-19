@@ -1,14 +1,16 @@
 {
-  "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
     "SignMeMaybe": {
       "commandName": "Project",
       "dotnetRunMessages": true,
-      "launchBrowser": true,
-      "launchUrl": "",
-      "applicationUrl": "http://localhost:1984",
+      "launchBrowser": false,
+      "applicationUrl": "http://0.0.0.0:1984",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
+        "SIGNMEMAYBE_DB_PATH": "/tmp/signmemaybe.sqlite3",
+        "SIGNMEMAYBE_PDF_ROOT": "/tmp/signmemaybe-pdfs",
+        "SIGNMEMAYBE_EXPORT_ROOT": "/tmp/signmemaybe-exports",
+        "SIGNMEMAYBE_MAX_UPLOAD_BYTES": "10485760"
       }
     }
   }
