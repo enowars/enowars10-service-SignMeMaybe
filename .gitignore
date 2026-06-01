@@ -4,6 +4,17 @@ obj/
 [Bb]in/
 [Oo]bj/
 
+# Python/checker build and cache output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
 # User/local IDE files
 .vscode/
 .idea/
@@ -14,9 +25,15 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Runtime service data
+# Runtime data
 service/data/*
 !service/data/.gitkeep
+checker/data/
+
+# Logs and crash dumps
+*.log
+*.tgz
+core
 
 # Local temporary planning files
 temp_data_structure.md
