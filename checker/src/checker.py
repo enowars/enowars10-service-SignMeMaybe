@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -309,7 +307,7 @@ async def putflag_contract(
     )
 
     # I return the contract id as attack hint so exploits do not have to scan the whole service.
-    return contract_id
+    return str(contract_id)
 
 
 @checker.getflag(0)
