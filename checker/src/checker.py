@@ -16,10 +16,12 @@ from enochecker3 import (
     ExploitCheckerTaskMessage,
     FlagSearcher,
     GetflagCheckerTaskMessage,
+    GetnoiseCheckerTaskMessage,
     HavocCheckerTaskMessage,
     MumbleException,
     OfflineException,
     PutflagCheckerTaskMessage,
+    PutnoiseCheckerTaskMessage,
 )
 from enochecker3.utils import assert_equals, assert_in
 
@@ -338,6 +340,83 @@ async def getflag_contract(
     data_obj = require_json_object(data, "latest contract response")
     content = get_string_field(data_obj, "content", "latest contract response")
     assert_equals(content, task.flag, "Stored flag content was incorrect")
+
+
+@checker.putnoise(0)
+async def putnoise_contract(
+    task: PutnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    username = "noise_" + random_suffix(16)
+    password = "noisepass_" + random_suffix(16)
+    title = "Reference Contract " + random_suffix(12)
+    content = "Noise contract body " + random_suffix(36)
+
+    logger.debug("Registering noise user")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating noise contract")
+    contract_id = await client.create_contract(token, title, content)
+
+    logger.debug("Checking that the noise contract is present in the owner's list")
+    contracts = await client.list_contracts(token)
+    listed_ids = [contract.get("contractId") for contract in contracts]
+    assert_in(contract_id, listed_ids, "Created noise contract was not visible in the owner's list")
+
+    await db.set(
+        "noise_contract",
+        {
+            "username": username,
+            "password": password,
+            "title": title,
+            "content": content,
+            "contract_id": contract_id,
+        },
+    )
+
+
+@checker.getnoise(0)
+async def getnoise_contract(
+    task: GetnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    try:
+        stored = await db.get("noise_contract")
+        username = stored["username"]
+        password = stored["password"]
+        title = stored["title"]
+        content = stored["content"]
+        contract_id = int(stored["contract_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MumbleException("Missing or broken database entry from putnoise") from exc
+
+    logger.debug("Logging in as the noise owner")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Checking that the noise contract is still listed")
+    contracts = await client.list_contracts(token)
+    listed_ids = [contract.get("contractId") for contract in contracts]
+    assert_in(contract_id, listed_ids, "Noise contract was not visible in the owner's list")
+
+    logger.debug("Retrieving noise contract")
+    status, data = await client.latest_contract_version(token, contract_id)
+
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored noise contract: HTTP {status}")
+
+    data_obj = require_json_object(data, "latest noise contract response")
+    assert_equals(data_obj.get("title"), title, "Stored noise contract title was incorrect")
+    assert_equals(
+        get_string_field(data_obj, "content", "latest noise contract response"),
+        content,
+        "Stored noise contract content was incorrect",
+    )
 
 
 @checker.havoc(0)
