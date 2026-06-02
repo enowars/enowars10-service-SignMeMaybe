@@ -147,7 +147,32 @@
                 <span><strong>State:</strong> ${escapeHtml(data.approvalState)}</span>
                 <span><strong>Checksum:</strong> ${escapeHtml(data.checksum)}</span>
             </div>
+            <p><button type="button" id="open-pdf-button" class="pdf-link secondary">Open generated PDF</button></p>
             <div class="viewer-content">${escapeHtml(data.content || "")}</div>`;
+
+        document.getElementById("open-pdf-button").addEventListener("click", async function () {
+            try {
+                await openPdf(data.pdfUrl);
+            } catch (error) {
+                showMessage(error.message, true);
+            }
+        });
+    }
+
+    async function openPdf(pdfUrl) {
+        const token = getToken();
+        const response = await fetch(pdfUrl, {
+            headers: token ? { "X-Session-Token": token } : {}
+        });
+
+        if (!response.ok) {
+            throw new Error(`PDF request failed with HTTP ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        window.open(objectUrl, "_blank", "noreferrer");
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
     }
 
     async function createContract(event) {

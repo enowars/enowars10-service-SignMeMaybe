@@ -36,6 +36,11 @@ textarea {
     font: inherit;
 }
 
+a {
+    color: var(--accent);
+    font-weight: 700;
+}
+
 button {
     border: 1px solid rgba(131, 197, 190, 0.58);
     border-radius: 6px;
@@ -274,6 +279,11 @@ h3 {
     overflow: auto;
     padding: 1rem;
     white-space: pre-wrap;
+}
+
+.pdf-link {
+    display: inline-block;
+    margin-top: 1rem;
 }
 
 .muted {

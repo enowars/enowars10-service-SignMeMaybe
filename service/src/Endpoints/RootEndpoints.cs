@@ -20,7 +20,8 @@ public static class RootEndpoints
                 "GET /api/me",
                 "POST /api/contracts",
                 "GET /api/contracts",
-                "GET /api/contracts/{contractId}/versions/latest"
+                "GET /api/contracts/{contractId}/versions/latest",
+                "GET /api/contracts/{contractId}/versions/latest/pdf"
             }
         }));
 

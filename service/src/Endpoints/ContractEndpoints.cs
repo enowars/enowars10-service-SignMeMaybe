@@ -1,6 +1,7 @@
 using System.Text;
 using SignMeMaybe.Configuration;
 using SignMeMaybe.Data;
+using SignMeMaybe.Documents;
 using SignMeMaybe.Models;
 using SignMeMaybe.Security;
 
@@ -18,6 +19,9 @@ public static class ContractEndpoints
 
         app.MapGet("/api/contracts/{contractId:long}/versions/latest", (HttpRequest httpRequest, long contractId) =>
             GetLatestContractVersion(httpRequest, contractId, options));
+
+        app.MapGet("/api/contracts/{contractId:long}/versions/latest/pdf", (HttpRequest httpRequest, long contractId) =>
+            GetLatestContractPdf(httpRequest, contractId, options));
     }
 
     private static IResult CreateContract(
@@ -63,9 +67,9 @@ public static class ContractEndpoints
 
         var contractId = Convert.ToInt64(insertContract.ExecuteScalar());
 
-        var storedFileName = $"{contractId}-{Guid.NewGuid():N}.txt";
+        var storedFileName = $"{contractId}-{Guid.NewGuid():N}.pdf";
         var storedFilePath = Path.Combine(options.PdfRoot, storedFileName);
-        File.WriteAllText(storedFilePath, request.Content, Encoding.UTF8);
+        PdfDocumentGenerator.WriteContractPdf(storedFilePath, title, request.Content);
 
         var checksum = Hashing.Sha256Hex(contentBytes);
 
@@ -73,14 +77,15 @@ public static class ContractEndpoints
         insertVersion.Transaction = transaction;
         insertVersion.CommandText = """
             INSERT INTO contract_versions
-                (contract_id, version_number, approval_state, file_path, checksum)
+                (contract_id, version_number, approval_state, file_path, checksum, content_text)
             VALUES
-                ($contract_id, 1, 'draft', $file_path, $checksum);
+                ($contract_id, 1, 'draft', $file_path, $checksum, $content_text);
             SELECT last_insert_rowid();
             """;
         Database.AddParameter(insertVersion, "$contract_id", contractId);
         Database.AddParameter(insertVersion, "$file_path", storedFilePath);
         Database.AddParameter(insertVersion, "$checksum", checksum);
+        Database.AddParameter(insertVersion, "$content_text", request.Content);
 
         var versionId = Convert.ToInt64(insertVersion.ExecuteScalar());
 
@@ -193,6 +198,7 @@ public static class ContractEndpoints
                 v.approval_state,
                 v.file_path,
                 v.checksum,
+                v.content_text,
                 v.created_at
             FROM contracts c
             JOIN contract_versions v ON v.contract_id = c.id
@@ -213,7 +219,10 @@ public static class ContractEndpoints
         }
 
         var storedFilePath = reader.GetString(6);
-        var content = File.Exists(storedFilePath)
+        var storedContent = reader.GetString(8);
+        var content = storedContent.Length > 0
+            ? storedContent
+            : File.Exists(storedFilePath) && Path.GetExtension(storedFilePath).Equals(".txt", StringComparison.OrdinalIgnoreCase)
             ? File.ReadAllText(storedFilePath, Encoding.UTF8)
             : "";
 
@@ -226,9 +235,58 @@ public static class ContractEndpoints
             versionNumber = reader.GetInt32(4),
             approvalState = reader.GetString(5),
             checksum = reader.GetString(7),
-            createdAt = reader.GetString(8),
+            createdAt = reader.GetString(9),
             requestedByUserId = user.Id,
-            content
+            content,
+            pdfUrl = $"/api/contracts/{contractId}/versions/latest/pdf"
         });
+    }
+
+    private static IResult GetLatestContractPdf(
+        HttpRequest httpRequest,
+        long contractId,
+        ServiceOptions options)
+    {
+        using var connection = Database.OpenConnection(options.DbPath);
+
+        if (!AuthService.TryGetUser(connection, httpRequest, out _))
+        {
+            return Results.Unauthorized();
+        }
+
+        using var command = connection.CreateCommand();
+
+        /*
+         * INTENTIONAL CTF VULNERABILITY: IDOR / missing authorization.
+         *
+         * This mirrors the latest-version JSON endpoint: a valid session is enough
+         * to fetch any generated PDF by contract ID.
+         */
+        command.CommandText = """
+            SELECT v.file_path
+            FROM contracts c
+            JOIN contract_versions v ON v.contract_id = c.id
+            WHERE c.id = $contract_id
+              AND v.version_number = (
+                  SELECT MAX(version_number)
+                  FROM contract_versions
+                  WHERE contract_id = c.id
+              )
+            LIMIT 1;
+            """;
+        Database.AddParameter(command, "$contract_id", contractId);
+
+        var storedFilePath = command.ExecuteScalar() as string;
+        if (storedFilePath is null || !File.Exists(storedFilePath))
+        {
+            return Results.NotFound(new { error = "contract PDF not found" });
+        }
+
+        if (!Path.GetExtension(storedFilePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.NotFound(new { error = "contract PDF not found" });
+        }
+
+        return Results.File(storedFilePath, "application/pdf", $"{contractId}-latest.pdf");
     }
 }

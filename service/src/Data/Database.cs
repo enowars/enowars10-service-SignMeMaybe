@@ -54,6 +54,7 @@ public static class Database
                 approval_state TEXT NOT NULL DEFAULT 'draft',
                 file_path TEXT NOT NULL,
                 checksum TEXT NOT NULL,
+                content_text TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE,
                 UNIQUE(contract_id, version_number)
@@ -140,10 +141,39 @@ public static class Database
                 ON exports(contract_version_id);
             """;
         command.ExecuteNonQuery();
+
+        EnsureColumn(
+            connection,
+            "contract_versions",
+            "content_text",
+            "ALTER TABLE contract_versions ADD COLUMN content_text TEXT NOT NULL DEFAULT '';");
     }
 
     public static void AddParameter(SqliteCommand command, string name, object? value)
     {
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+    }
+
+    private static void EnsureColumn(
+        SqliteConnection connection,
+        string tableName,
+        string columnName,
+        string alterSql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+        }
+
+        using var alter = connection.CreateCommand();
+        alter.CommandText = alterSql;
+        alter.ExecuteNonQuery();
     }
 }
