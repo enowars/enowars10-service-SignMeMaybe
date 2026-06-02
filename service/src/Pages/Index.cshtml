@@ -1,0 +1,108 @@
+@page
+@model SignMeMaybe.Pages.IndexModel
+@{
+    ViewData["Title"] = "SignMeMaybe";
+}
+
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"]</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    <div class="page-shell">
+        <header class="top-bar">
+            <div class="brand-lockup" aria-label="SignMeMaybe">
+                <img class="brand-mark" src="~/img/archive-mark.svg" asp-append-version="true" alt="" aria-hidden="true" />
+                <div>
+                    <p class="eyebrow">Civic Records Access Node</p>
+                    <h1>SignMeMaybe</h1>
+                </div>
+            </div>
+            <div class="system-strip" aria-label="System status">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>Archive link online</span>
+            </div>
+        </header>
+
+        <main class="portal-grid">
+            <section class="panel auth-panel" aria-labelledby="access-title">
+                <div class="panel-header">
+                    <p class="eyebrow">Identity terminal</p>
+                    <h2 id="access-title">Access</h2>
+                </div>
+
+                <form id="auth-form" class="stack">
+                    <label>
+                        Username
+                        <input id="username" name="username" autocomplete="username" minlength="3" maxlength="40" required />
+                    </label>
+                    <label>
+                        Password
+                        <input id="password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="200" required />
+                    </label>
+                    <div class="button-row">
+                        <button type="button" id="register-button">Register</button>
+                        <button type="submit" id="login-button" class="secondary">Log in</button>
+                    </div>
+                </form>
+
+                <div id="session-card" class="session-card hidden" aria-live="polite">
+                    <p class="eyebrow">Active clearance</p>
+                    <p id="session-user">No active session</p>
+                    <button type="button" id="logout-button" class="ghost">End session</button>
+                </div>
+            </section>
+
+            <section class="panel compose-panel" aria-labelledby="compose-title">
+                <div class="panel-header">
+                    <p class="eyebrow">Record intake</p>
+                    <h2 id="compose-title">Create contract</h2>
+                </div>
+
+                <form id="contract-form" class="stack">
+                    <label>
+                        Title
+                        <input id="contract-title" name="title" maxlength="120" required />
+                    </label>
+                    <label>
+                        Content
+                        <textarea id="contract-content" name="content" rows="8" required></textarea>
+                    </label>
+                    <button type="submit">Seal record</button>
+                </form>
+            </section>
+
+            <section class="panel list-panel" aria-labelledby="records-title">
+                <div class="panel-header split">
+                    <div>
+                        <p class="eyebrow">Private archive</p>
+                        <h2 id="records-title">My contracts</h2>
+                    </div>
+                    <button type="button" id="refresh-button" class="icon-button" title="Refresh records" aria-label="Refresh records">↻</button>
+                </div>
+                <div id="contract-list" class="contract-list" aria-live="polite">
+                    <p class="muted">Log in to load records.</p>
+                </div>
+            </section>
+
+            <section class="panel viewer-panel" aria-labelledby="viewer-title">
+                <div class="panel-header">
+                    <p class="eyebrow">Document viewer</p>
+                    <h2 id="viewer-title">Latest version</h2>
+                </div>
+                <article id="contract-viewer" class="contract-viewer">
+                    <p class="muted">Select a contract to inspect its latest version.</p>
+                </article>
+            </section>
+        </main>
+
+        <aside id="message-area" class="message-area" aria-live="polite"></aside>
+    </div>
+
+    <script src="~/js/portal.js" asp-append-version="true"></script>
+</body>
+</html>

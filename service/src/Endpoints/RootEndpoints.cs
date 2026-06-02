@@ -6,12 +6,14 @@ public static class RootEndpoints
 {
     public static void MapRootEndpoints(this WebApplication app, ServiceOptions options)
     {
-        app.MapGet("/", () => Results.Json(new
+        app.MapGet("/api/info", () => Results.Json(new
         {
             service = "SignMeMaybe",
             message = "Tiny contract signing service for A/D CTF testing.",
             endpoints = new[]
             {
+                "GET /",
+                "GET /api/info",
                 "GET /health",
                 "POST /api/register",
                 "POST /api/login",

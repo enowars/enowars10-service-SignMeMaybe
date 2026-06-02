@@ -5,6 +5,8 @@ using SignMeMaybe.Endpoints;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddRazorPages();
+
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
@@ -18,9 +20,12 @@ options.EnsureStorageExists();
 
 Database.Initialize(options.DbPath);
 
+app.UseStaticFiles();
+
 app.MapRootEndpoints(options);
 app.MapAuthEndpoints(options);
 app.MapContractEndpoints(options);
+app.MapRazorPages();
 
 app.Run();
 
