@@ -4,7 +4,8 @@ public sealed record ServiceOptions(
     string DbPath,
     string PdfRoot,
     string ExportRoot,
-    long MaxUploadBytes)
+    long MaxUploadBytes,
+    int CleanupRetentionSeconds)
 {
     public static ServiceOptions LoadFromEnvironment()
     {
@@ -24,7 +25,11 @@ public sealed record ServiceOptions(
             ? parsedMaxUploadBytes
             : 10_485_760;
 
-        return new ServiceOptions(dbPath, pdfRoot, exportRoot, maxUploadBytes);
+        var cleanupRetentionSeconds = LoadPositiveInt(
+            "SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS",
+            720);
+
+        return new ServiceOptions(dbPath, pdfRoot, exportRoot, maxUploadBytes, cleanupRetentionSeconds);
     }
 
     public void EnsureStorageExists()
@@ -32,5 +37,13 @@ public sealed record ServiceOptions(
         Directory.CreateDirectory(Path.GetDirectoryName(DbPath) ?? "/data");
         Directory.CreateDirectory(PdfRoot);
         Directory.CreateDirectory(ExportRoot);
+    }
+
+    private static int LoadPositiveInt(string name, int fallback)
+    {
+        var raw = Environment.GetEnvironmentVariable(name);
+        return int.TryParse(raw, out var parsed) && parsed > 0
+            ? parsed
+            : fallback;
     }
 }

@@ -17,8 +17,27 @@ services:
       SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
       SIGNMEMAYBE_EXPORT_ROOT: "/data/exports"
       SIGNMEMAYBE_MAX_UPLOAD_BYTES: "10485760"
+      SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS: "720"
 
     restart: unless-stopped
     mem_limit: 1g
     cpus: 1
+
+  signmemaybe-cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile.cleanup
+    volumes:
+      - ./data/:/data:rw
+    environment:
+      SIGNMEMAYBE_DB_PATH: "/data/signmemaybe.sqlite3"
+      SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
+      SIGNMEMAYBE_EXPORT_ROOT: "/data/exports"
+      SIGNMEMAYBE_MAX_UPLOAD_BYTES: "10485760"
+      SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS: "720"
+    depends_on:
+      - signmemaybe
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.25
     

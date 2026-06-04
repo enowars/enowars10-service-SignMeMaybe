@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import string
 from logging import LoggerAdapter
 from typing import Any, Optional
@@ -28,6 +29,8 @@ Checker config
 
 SERVICE_PORT = 1984
 HTTP_TIMEOUT_SECONDS = float(os.getenv("SIGNMEMAYBE_CHECKER_TIMEOUT", "5"))
+EXPECTED_FLAG_FORMAT = r"ENO[A-Za-z0-9+/=]{48}"
+EXPECTED_FLAG_RE = re.compile(rf"^{EXPECTED_FLAG_FORMAT}$")
 
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
@@ -96,6 +99,11 @@ def random_password() -> str:
     return "pass-" + random_suffix(24)
 
 
+def log_unexpected_flag_format(flag: Any, logger: LoggerAdapter) -> None:
+    if not isinstance(flag, str) or EXPECTED_FLAG_RE.fullmatch(flag) is None:
+        logger.debug("Provided task flag does not match expected format %s", EXPECTED_FLAG_FORMAT)
+
+
 def service_base_url(task: Any) -> str:
     address = getattr(task, "address", None) or getattr(task, "host", None)
     if not isinstance(address, str) or not address:
@@ -149,6 +157,40 @@ class HttpClient:
                 return resp.status, self._decode_response(resp.read())
         except error.HTTPError as exc:
             return exc.code, self._decode_response(exc.read())
+        except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            self.logger.debug("Connection to service failed: %r", exc)
+            raise OfflineException("Could not connect to service") from exc
+
+    async def request_bytes(
+        self,
+        method: str,
+        path: str,
+        token: str | None = None,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        return await asyncio.to_thread(self._request_bytes_sync, method, path, token)
+
+    def _request_bytes_sync(
+        self,
+        method: str,
+        path: str,
+        token: str | None,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        url = self.base_url + path
+        headers: dict[str, str] = {"Accept": "application/pdf, application/octet-stream"}
+
+        if token is not None:
+            headers["X-Session-Token"] = token
+
+        req = request.Request(url, headers=headers, method=method)
+        self.logger.debug("Sending %s %s", method, path)
+
+        try:
+            with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                response_headers = {key.lower(): value for key, value in resp.headers.items()}
+                return resp.status, resp.read(), response_headers
+        except error.HTTPError as exc:
+            response_headers = {key.lower(): value for key, value in exc.headers.items()}
+            return exc.code, exc.read(), response_headers
         except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             self.logger.debug("Connection to service failed: %r", exc)
             raise OfflineException("Could not connect to service") from exc
@@ -212,6 +254,9 @@ class HttpClient:
 
         return user_id, username, token
 
+    async def current_user(self, token: str) -> tuple[int, Any]:
+        return await self.request_json("GET", "/api/me", token=token)
+
     async def create_contract(self, token: str, title: str, content: str) -> str:
         status, data = await self.request_json(
             "POST",
@@ -264,6 +309,13 @@ class HttpClient:
         return await self.request_json(
             "GET",
             f"/api/contracts/{reference}/versions/latest",
+            token=token,
+        )
+
+    async def latest_contract_pdf(self, token: str, reference: str) -> tuple[int, bytes, dict[str, str]]:
+        return await self.request_bytes(
+            "GET",
+            f"/api/contracts/{reference}/versions/latest/pdf",
             token=token,
         )
 
@@ -353,6 +405,7 @@ async def putflag_contract(
     logger: LoggerAdapter,
 ) -> str:
     client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
 
     username = random_username()
     password = random_password()
@@ -389,6 +442,7 @@ async def getflag_contract(
     logger: LoggerAdapter,
 ) -> None:
     client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
 
     try:
         stored = await db.get("contract")
@@ -412,7 +466,8 @@ async def getflag_contract(
 
     data_obj = require_json_object(data, "latest contract response")
     content = get_string_field(data_obj, "content", "latest contract response")
-    assert_equals(content, task.flag, "Stored flag content was incorrect")
+    if content != task.flag:
+        raise MumbleException("Stored flag content was incorrect")
 
 
 @checker.putnoise(0)
@@ -430,6 +485,13 @@ async def putnoise_contract(
 
     logger.debug("Registering noise user")
     _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Checking current noise user session")
+    status, data = await client.current_user(token)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve current noise user: HTTP {status}")
+    data_obj = require_json_object(data, "current noise user response")
+    assert_equals(data_obj.get("username"), username, "Current noise user was incorrect")
 
     logger.debug("Creating noise contract")
     reference = await client.create_contract(token, title, content)
@@ -475,10 +537,33 @@ async def getnoise_contract(
     logger.debug("Logging in as the noise owner")
     _user_id, _username, token = await client.login_user(username, password)
 
+    logger.debug("Checking current noise user after login")
+    status, data = await client.current_user(token)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve logged-in noise user: HTTP {status}")
+    data_obj = require_json_object(data, "logged-in noise user response")
+    assert_equals(data_obj.get("username"), username, "Logged-in noise user was incorrect")
+
     logger.debug("Checking that the noise contract is still listed")
     contracts = await client.list_contracts(token)
     listed_references = [contract.get("reference") for contract in contracts]
     assert_in(reference, listed_references, "Noise contract was not visible in the owner's list")
+
+    logger.debug("Checking public noise contract metadata")
+    status, data = await client.public_contracts_by_username(username)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve public noise metadata: HTTP {status}")
+    data_obj = require_json_object(data, "public noise metadata response")
+    assert_equals(data_obj.get("username"), username, "Public noise metadata username was incorrect")
+    public_contracts = data_obj.get("contracts")
+    if not isinstance(public_contracts, list):
+        raise MumbleException("Public noise metadata did not contain a contracts list")
+    public_references = [
+        contract.get("reference")
+        for contract in public_contracts
+        if isinstance(contract, dict)
+    ]
+    assert_in(reference, public_references, "Noise contract was not visible in public metadata")
 
     logger.debug("Retrieving noise contract")
     status, data = await client.latest_contract_version(token, reference)
@@ -493,6 +578,16 @@ async def getnoise_contract(
         content,
         "Stored noise contract content was incorrect",
     )
+
+    logger.debug("Retrieving noise contract PDF")
+    status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored noise contract PDF: HTTP {status}")
+    content_type = headers.get("content-type", "").lower()
+    if "application/pdf" not in content_type:
+        raise MumbleException("Stored noise contract PDF had the wrong content type")
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise MumbleException("Stored noise contract PDF was not a valid PDF")
 
 
 @checker.havoc(0)
@@ -510,30 +605,67 @@ async def havoc_health(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> 
 
 
 @checker.havoc(1)
-async def havoc_contract_flow(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
+async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
     client = make_client(task, logger)
 
     username = random_username()
     password = random_password()
-    title = "Havoc Contract " + random_suffix(12)
-    content = "contract text " + random_suffix(32)
 
-    logger.debug("Registering a havoc user")
-    _user_id, _username, token = await client.register_user(username, password)
+    logger.debug("Checking that login rejects an unknown account")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/login",
+        {
+            "username": username,
+            "password": password,
+        },
+    )
+    if status != 401:
+        raise MumbleException(f"Unknown-account login was not rejected: HTTP {status}")
 
-    logger.debug("Creating a havoc contract")
-    reference = await client.create_contract(token, title, content)
+    logger.debug("Checking that /api/me rejects missing authentication")
+    status, _data = await client.request_json("GET", "/api/me")
+    if status != 401:
+        raise MumbleException(f"Unauthenticated /api/me was not rejected: HTTP {status}")
 
-    logger.debug("Retrieving the havoc contract")
-    status, data = await client.latest_contract_version(token, reference)
+    logger.debug("Checking that contract listing rejects missing authentication")
+    status, _data = await client.request_json("GET", "/api/contracts")
+    if status != 401:
+        raise MumbleException(f"Unauthenticated contract listing was not rejected: HTTP {status}")
 
-    if status != 200:
-        raise MumbleException(f"Could not retrieve havoc contract: HTTP {status}")
+    logger.debug("Checking that contract creation rejects missing authentication")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/contracts",
+        {
+            "title": "Rejected Contract " + random_suffix(12),
+            "content": "stateless rejection check " + random_suffix(24),
+        },
+    )
+    if status != 401:
+        raise MumbleException(f"Unauthenticated contract creation was not rejected: HTTP {status}")
 
-    data_obj = require_json_object(data, "havoc latest contract response")
-    assert_equals(data_obj.get("reference"), reference, "Wrong contract reference returned")
-    assert_equals(data_obj.get("title"), title, "Wrong contract title returned")
-    assert_equals(data_obj.get("content"), content, "Wrong contract content returned")
+    logger.debug("Checking that invalid registration input is rejected")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/register",
+        {
+            "username": "x",
+            "password": "tiny",
+        },
+    )
+    if status != 400:
+        raise MumbleException(f"Invalid registration input was not rejected: HTTP {status}")
+
+    logger.debug("Checking that an unknown public holder returns not found")
+    status, _data = await client.public_contracts_by_username("missing_" + random_suffix(12))
+    if status != 404:
+        raise MumbleException(f"Unknown public holder did not return not found: HTTP {status}")
+
+    logger.debug("Checking that malformed public holder input is rejected")
+    status, _data = await client.request_json("GET", "/api/users/%20/contracts")
+    if status != 400:
+        raise MumbleException(f"Malformed public holder lookup was not rejected: HTTP {status}")
 
 
 @checker.exploit(0)

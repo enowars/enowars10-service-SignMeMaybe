@@ -2,6 +2,24 @@ using System.Text.Json;
 using SignMeMaybe.Configuration;
 using SignMeMaybe.Data;
 using SignMeMaybe.Endpoints;
+using SignMeMaybe.Maintenance;
+
+if (args.Any(arg => string.Equals(arg, "--cleanup-once", StringComparison.OrdinalIgnoreCase)))
+{
+    var cleanupOptions = ServiceOptions.LoadFromEnvironment();
+    cleanupOptions.EnsureStorageExists();
+
+    Database.Initialize(cleanupOptions.DbPath);
+    var result = CleanupRunner.Run(cleanupOptions);
+    Console.WriteLine(
+        "cleanup complete: " +
+        $"files={result.DeletedFiles} " +
+        $"sessions={result.DeletedSessions} " +
+        $"contracts={result.DeletedContracts} " +
+        $"exports={result.DeletedExports} " +
+        $"users={result.DeletedUsers}");
+    return;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
