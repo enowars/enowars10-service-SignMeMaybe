@@ -65,15 +65,21 @@ public static class AuthEndpoints
             """;
         Database.AddParameter(command, "$username", request.Username.Trim());
 
-        using var reader = command.ExecuteReader();
-        if (!reader.Read())
-        {
-            return Results.Unauthorized();
-        }
+        long userId;
+        string username;
+        string expectedPasswordHash;
 
-        var userId = reader.GetInt64(0);
-        var username = reader.GetString(1);
-        var expectedPasswordHash = reader.GetString(2);
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read())
+            {
+                return Results.Unauthorized();
+            }
+
+            userId = reader.GetInt64(0);
+            username = reader.GetString(1);
+            expectedPasswordHash = reader.GetString(2);
+        }
 
         if (!Hashing.FixedTimeEquals(expectedPasswordHash, Hashing.HashPassword(request.Password)))
         {

@@ -103,7 +103,7 @@ Important API endpoints include:
 
 Authentication uses random session tokens sent via the `X-Session-Token` HTTP header. Persistent data is stored in SQLite at `/data/signmemaybe.sqlite3`, and generated PDFs are written under `/data/pdfs`.
 
-`service/docker-compose.yml` also starts a `signmemaybe-cleanup` container. It runs an OS cron job once per minute and calls the service cleanup mode to remove service-created files and stale runtime data older than `SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS` seconds. The default is `720` seconds, or 12 minutes. Runtime database files may remain, but old users, sessions, contracts, exports, and generated PDFs are removed.
+`service/docker-compose.yml` also starts a `signmemaybe-cleanup` container. It runs an OS cron job once per minute and calls the service cleanup mode to remove service-created files and stale runtime data older than `SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS` seconds. The default is `720` seconds, or 12 minutes. Runtime database files may remain, but old users, sessions, contracts, exports, and generated PDFs are removed. Cleanup is opportunistic: if the SQLite database is missing or busy, that cleanup tick exits successfully and tries again on the next minute.
 
 The service can also be run without Docker:
 
@@ -169,3 +169,7 @@ For cleanup testing, use a short retention value against temporary storage:
 ```bash
 SIGNMEMAYBE_DB_PATH=/tmp/signmemaybe-smoke.sqlite3 SIGNMEMAYBE_PDF_ROOT=/tmp/signmemaybe-smoke-pdfs SIGNMEMAYBE_EXPORT_ROOT=/tmp/signmemaybe-smoke-exports SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS=1 dotnet run --project service/src/SignMeMaybe.csproj -- --cleanup-once
 ```
+
+## Troubleshooting
+
+If checker logs show `OfflineException: Could not connect to service` during `getflag` or `getnoise` login, inspect service logs for `SQLite Error 5: 'database is locked'`. Current service code uses WAL mode at initialization, a per-connection SQLite busy timeout, closes login readers before session writes, and lets cleanup skip busy DB ticks.

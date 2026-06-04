@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using SignMeMaybe.Configuration;
 using SignMeMaybe.Data;
 using SignMeMaybe.Endpoints;
@@ -9,8 +10,23 @@ if (args.Any(arg => string.Equals(arg, "--cleanup-once", StringComparison.Ordina
     var cleanupOptions = ServiceOptions.LoadFromEnvironment();
     cleanupOptions.EnsureStorageExists();
 
-    Database.Initialize(cleanupOptions.DbPath);
-    var result = CleanupRunner.Run(cleanupOptions);
+    if (!File.Exists(cleanupOptions.DbPath))
+    {
+        Console.WriteLine("cleanup skipped: database does not exist yet");
+        return;
+    }
+
+    CleanupResult result;
+    try
+    {
+        result = CleanupRunner.Run(cleanupOptions);
+    }
+    catch (SqliteException ex) when (Database.IsBusyOrLocked(ex))
+    {
+        Console.WriteLine("cleanup skipped: database is busy");
+        return;
+    }
+
     Console.WriteLine(
         "cleanup complete: " +
         $"files={result.DeletedFiles} " +

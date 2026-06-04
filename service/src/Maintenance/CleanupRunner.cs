@@ -13,6 +13,12 @@ public static class CleanupRunner
         var cutoffText = cutoffUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
         using var connection = Database.OpenConnection(options.DbPath);
+
+        if (!HasRuntimeSchema(connection))
+        {
+            return CleanupResult.Skipped;
+        }
+
         using var transaction = connection.BeginTransaction();
 
         var staleFilePaths = LoadStaleFilePaths(connection, transaction, cutoffText);
@@ -114,6 +120,21 @@ public static class CleanupRunner
         return command.ExecuteNonQuery();
     }
 
+    private static bool HasRuntimeSchema(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('users', 'sessions', 'contracts', 'contract_versions')
+            GROUP BY type
+            HAVING COUNT(*) = 4;
+            """;
+
+        return command.ExecuteScalar() is not null;
+    }
+
     private static int DeleteOldFiles(string root, DateTime cutoffUtc, ServiceOptions options)
     {
         if (!Directory.Exists(root))
@@ -200,4 +221,7 @@ public sealed record CleanupResult(
     int DeletedSessions,
     int DeletedContracts,
     int DeletedExports,
-    int DeletedUsers);
+    int DeletedUsers)
+{
+    public static CleanupResult Skipped { get; } = new(0, 0, 0, 0, 0);
+}

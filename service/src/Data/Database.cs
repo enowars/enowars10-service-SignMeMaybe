@@ -12,7 +12,7 @@ public static class Database
 
         using var pragma = connection.CreateCommand();
         pragma.CommandText = """
-            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
             PRAGMA foreign_keys = ON;
             """;
         pragma.ExecuteNonQuery();
@@ -23,6 +23,13 @@ public static class Database
     public static void Initialize(string dbPath)
     {
         using var connection = OpenConnection(dbPath);
+
+        using var initializationPragma = connection.CreateCommand();
+        initializationPragma.CommandText = """
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            """;
+        initializationPragma.ExecuteNonQuery();
 
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -169,6 +176,11 @@ public static class Database
     public static void AddParameter(SqliteCommand command, string name, object? value)
     {
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+    }
+
+    public static bool IsBusyOrLocked(SqliteException exception)
+    {
+        return exception.SqliteErrorCode is 5 or 6;
     }
 
     public static string CreateUniqueContractReference(

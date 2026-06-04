@@ -137,7 +137,7 @@ Cleanup uses the same runtime environment as the service:
 *   `SIGNMEMAYBE_EXPORT_ROOT`, default `/data/exports`
 *   `SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS`, default `720`
 
-Each cleanup pass removes generated PDF/export files under the configured runtime roots when they are older than the retention window. It also deletes old sessions, old contracts and cascaded dependent rows, old exports, and old users that have no remaining live sessions or contracts. The SQLite file itself may remain.
+Each cleanup pass removes generated PDF/export files under the configured runtime roots when they are older than the retention window. It also deletes old sessions, old contracts and cascaded dependent rows, old exports, and old users that have no remaining live sessions or contracts. The SQLite file itself may remain. Cleanup is opportunistic: missing, uninitialized, or busy SQLite databases cause the current cleanup tick to exit successfully and retry on the next minute.
 
 ## Local Smoke Test
 
@@ -166,3 +166,7 @@ Run one cleanup pass against the temporary storage:
 ```bash
 SIGNMEMAYBE_DB_PATH=/tmp/signmemaybe-smoke.sqlite3 SIGNMEMAYBE_PDF_ROOT=/tmp/signmemaybe-smoke-pdfs SIGNMEMAYBE_EXPORT_ROOT=/tmp/signmemaybe-smoke-exports SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS=1 dotnet run --project service/src/SignMeMaybe.csproj -- --cleanup-once
 ```
+
+## Troubleshooting
+
+Checker `OfflineException: Could not connect to service` during `getflag` or `getnoise` login can be caused by service-side SQLite lock contention. Check service logs for `SQLite Error 5: 'database is locked'`. Login must close its user lookup reader before inserting a session, live connections use `PRAGMA busy_timeout`, and the cleanup cron must skip busy ticks instead of competing with checker traffic.
