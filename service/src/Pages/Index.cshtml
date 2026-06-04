@@ -89,6 +89,25 @@
                 </div>
             </section>
 
+            <section class="panel public-panel" aria-labelledby="public-title">
+                <div class="panel-header">
+                    <p class="eyebrow">Public index</p>
+                    <h2 id="public-title">Find holder records</h2>
+                </div>
+
+                <form id="public-lookup-form" class="stack">
+                    <label>
+                        Holder username
+                        <input id="public-username" name="publicUsername" autocomplete="off" minlength="3" maxlength="40" required />
+                    </label>
+                    <button type="submit" class="secondary">Search archive</button>
+                </form>
+
+                <div id="public-contract-list" class="contract-list public-contract-list" aria-live="polite">
+                    <p class="muted">Search a holder name to inspect public contract metadata.</p>
+                </div>
+            </section>
+
             <section class="panel viewer-panel" aria-labelledby="viewer-title">
                 <div class="panel-header">
                     <p class="eyebrow">Document viewer</p>

@@ -241,6 +241,10 @@ h3 {
     gap: 0.65rem;
 }
 
+.public-contract-list {
+    margin-top: 1rem;
+}
+
 .contract-item {
     background: #0a1215;
     border: 1px solid var(--line);

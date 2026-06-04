@@ -15,6 +15,9 @@
         contractContent: document.getElementById("contract-content"),
         contractList: document.getElementById("contract-list"),
         contractViewer: document.getElementById("contract-viewer"),
+        publicLookupForm: document.getElementById("public-lookup-form"),
+        publicUsername: document.getElementById("public-username"),
+        publicContractList: document.getElementById("public-contract-list"),
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
     };
@@ -121,28 +124,33 @@
 
         elements.contractList.innerHTML = "";
         for (const contract of contracts) {
-            const item = document.createElement("button");
-            item.type = "button";
-            item.className = "contract-item";
-            item.innerHTML = `
-                <strong>${escapeHtml(contract.title)}</strong>
-                <span class="meta-row">
-                    <span>ID ${contract.contractId}</span>
-                    <span>Version ${contract.latestVersion.versionNumber}</span>
-                    <span>${escapeHtml(contract.latestVersion.approvalState)}</span>
-                </span>`;
-            item.addEventListener("click", () => loadContract(contract.contractId));
-            elements.contractList.appendChild(item);
+            elements.contractList.appendChild(renderContractButton(contract));
         }
     }
 
-    async function loadContract(contractId) {
-        const data = await api(`/api/contracts/${contractId}/versions/latest`);
+    function renderContractButton(contract) {
+        const reference = contract.reference || "";
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "contract-item";
+        item.innerHTML = `
+            <strong>${escapeHtml(contract.title)}</strong>
+            <span class="meta-row">
+                <span>Ref ${escapeHtml(reference)}</span>
+                <span>Version ${contract.latestVersion.versionNumber}</span>
+                <span>${escapeHtml(contract.latestVersion.approvalState)}</span>
+            </span>`;
+        item.addEventListener("click", () => loadContract(reference));
+        return item;
+    }
+
+    async function loadContract(reference) {
+        const data = await api(`/api/contracts/${encodeURIComponent(reference)}/versions/latest`);
         elements.contractViewer.innerHTML = `
             <h3>${escapeHtml(data.title)}</h3>
             <div class="meta-row">
-                <span><strong>Contract:</strong> ${data.contractId}</span>
-                <span><strong>Owner:</strong> ${data.ownerUserId}</span>
+                <span><strong>Reference:</strong> ${escapeHtml(data.reference)}</span>
+                <span><strong>Owner:</strong> ${escapeHtml(data.ownerUsername)}</span>
                 <span><strong>Version:</strong> ${data.versionNumber}</span>
                 <span><strong>State:</strong> ${escapeHtml(data.approvalState)}</span>
                 <span><strong>Checksum:</strong> ${escapeHtml(data.checksum)}</span>
@@ -189,7 +197,25 @@
         elements.contractForm.reset();
         showMessage("Contract sealed into the archive.", false);
         await loadContracts();
-        await loadContract(created.contractId);
+        await loadContract(created.reference);
+    }
+
+    async function lookupPublicContracts(event) {
+        event.preventDefault();
+
+        const username = elements.publicUsername.value.trim();
+        const data = await api(`/api/users/${encodeURIComponent(username)}/contracts`);
+        const contracts = Array.isArray(data.contracts) ? data.contracts : [];
+
+        if (contracts.length === 0) {
+            elements.publicContractList.innerHTML = '<p class="muted">No public contract metadata found for this holder.</p>';
+            return;
+        }
+
+        elements.publicContractList.innerHTML = "";
+        for (const contract of contracts) {
+            elements.publicContractList.appendChild(renderContractButton(contract));
+        }
     }
 
     function escapeHtml(value) {
@@ -223,6 +249,15 @@
     elements.contractForm.addEventListener("submit", async function (event) {
         try {
             await createContract(event);
+        } catch (error) {
+            event.preventDefault();
+            showMessage(error.message, true);
+        }
+    });
+
+    elements.publicLookupForm.addEventListener("submit", async function (event) {
+        try {
+            await lookupPublicContracts(event);
         } catch (error) {
             event.preventDefault();
             showMessage(error.message, true);

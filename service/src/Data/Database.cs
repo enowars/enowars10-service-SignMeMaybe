@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Security.Cryptography;
 
 namespace SignMeMaybe.Data;
 
@@ -41,6 +42,7 @@ public static class Database
 
             CREATE TABLE IF NOT EXISTS contracts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_reference TEXT NOT NULL UNIQUE,
                 owner_user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -147,11 +149,52 @@ public static class Database
             "contract_versions",
             "content_text",
             "ALTER TABLE contract_versions ADD COLUMN content_text TEXT NOT NULL DEFAULT '';");
+
+        EnsureColumn(
+            connection,
+            "contracts",
+            "public_reference",
+            "ALTER TABLE contracts ADD COLUMN public_reference TEXT;");
+
+        BackfillContractReferences(connection);
+
+        using var index = connection.CreateCommand();
+        index.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contracts_public_reference
+                ON contracts(public_reference);
+            """;
+        index.ExecuteNonQuery();
     }
 
     public static void AddParameter(SqliteCommand command, string name, object? value)
     {
         command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+    }
+
+    public static string CreateUniqueContractReference(
+        SqliteConnection connection,
+        SqliteTransaction? transaction = null)
+    {
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            var reference = CreateContractReference();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT 1
+                FROM contracts
+                WHERE public_reference = $public_reference
+                LIMIT 1;
+                """;
+            AddParameter(command, "$public_reference", reference);
+
+            if (command.ExecuteScalar() is null)
+            {
+                return reference;
+            }
+        }
+
+        throw new InvalidOperationException("Could not generate a unique contract reference.");
     }
 
     private static void EnsureColumn(
@@ -175,5 +218,44 @@ public static class Database
         using var alter = connection.CreateCommand();
         alter.CommandText = alterSql;
         alter.ExecuteNonQuery();
+    }
+
+    private static void BackfillContractReferences(SqliteConnection connection)
+    {
+        var contractIds = new List<long>();
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT id
+                FROM contracts
+                WHERE public_reference IS NULL
+                   OR public_reference = '';
+                """;
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                contractIds.Add(reader.GetInt64(0));
+            }
+        }
+
+        foreach (var contractId in contractIds)
+        {
+            using var update = connection.CreateCommand();
+            update.CommandText = """
+                UPDATE contracts
+                SET public_reference = $public_reference
+                WHERE id = $id;
+                """;
+            AddParameter(update, "$public_reference", CreateUniqueContractReference(connection));
+            AddParameter(update, "$id", contractId);
+            update.ExecuteNonQuery();
+        }
+    }
+
+    private static string CreateContractReference()
+    {
+        return "CNTR-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
     }
 }

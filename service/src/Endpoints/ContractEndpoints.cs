@@ -17,11 +17,14 @@ public static class ContractEndpoints
         app.MapGet("/api/contracts", (HttpRequest httpRequest) =>
             ListContracts(httpRequest, options));
 
-        app.MapGet("/api/contracts/{contractId:long}/versions/latest", (HttpRequest httpRequest, long contractId) =>
-            GetLatestContractVersion(httpRequest, contractId, options));
+        app.MapGet("/api/users/{username}/contracts", (string username) =>
+            ListPublicContractsByUsername(username, options));
 
-        app.MapGet("/api/contracts/{contractId:long}/versions/latest/pdf", (HttpRequest httpRequest, long contractId) =>
-            GetLatestContractPdf(httpRequest, contractId, options));
+        app.MapGet("/api/contracts/{reference}/versions/latest", (HttpRequest httpRequest, string reference) =>
+            GetLatestContractVersion(httpRequest, reference, options));
+
+        app.MapGet("/api/contracts/{reference}/versions/latest/pdf", (HttpRequest httpRequest, string reference) =>
+            GetLatestContractPdf(httpRequest, reference, options));
     }
 
     private static IResult CreateContract(
@@ -55,19 +58,22 @@ public static class ContractEndpoints
 
         using var transaction = connection.BeginTransaction();
 
+        var reference = Database.CreateUniqueContractReference(connection, transaction);
+
         using var insertContract = connection.CreateCommand();
         insertContract.Transaction = transaction;
         insertContract.CommandText = """
-            INSERT INTO contracts (owner_user_id, title)
-            VALUES ($owner_user_id, $title);
+            INSERT INTO contracts (public_reference, owner_user_id, title)
+            VALUES ($public_reference, $owner_user_id, $title);
             SELECT last_insert_rowid();
             """;
+        Database.AddParameter(insertContract, "$public_reference", reference);
         Database.AddParameter(insertContract, "$owner_user_id", user.Id);
         Database.AddParameter(insertContract, "$title", title);
 
         var contractId = Convert.ToInt64(insertContract.ExecuteScalar());
 
-        var storedFileName = $"{contractId}-{Guid.NewGuid():N}.pdf";
+        var storedFileName = $"{reference}-{Guid.NewGuid():N}.pdf";
         var storedFilePath = Path.Combine(options.PdfRoot, storedFileName);
         PdfDocumentGenerator.WriteContractPdf(storedFilePath, title, request.Content);
 
@@ -87,15 +93,14 @@ public static class ContractEndpoints
         Database.AddParameter(insertVersion, "$checksum", checksum);
         Database.AddParameter(insertVersion, "$content_text", request.Content);
 
-        var versionId = Convert.ToInt64(insertVersion.ExecuteScalar());
+        insertVersion.ExecuteScalar();
 
         transaction.Commit();
 
-        return Results.Created($"/api/contracts/{contractId}/versions/latest", new
+        return Results.Created($"/api/contracts/{Uri.EscapeDataString(reference)}/versions/latest", new
         {
-            contractId,
-            versionId,
-            ownerUserId = user.Id,
+            reference,
+            ownerUsername = user.Username,
             title,
             versionNumber = 1,
             approvalState = "draft",
@@ -115,10 +120,9 @@ public static class ContractEndpoints
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT
-                c.id,
+                c.public_reference,
                 c.title,
                 c.created_at,
-                v.id,
                 v.version_number,
                 v.approval_state,
                 v.checksum,
@@ -142,12 +146,74 @@ public static class ContractEndpoints
         {
             contracts.Add(new
             {
-                contractId = reader.GetInt64(0),
+                reference = reader.GetString(0),
                 title = reader.GetString(1),
                 createdAt = reader.GetString(2),
                 latestVersion = new
                 {
-                    versionId = reader.GetInt64(3),
+                    versionNumber = reader.GetInt32(3),
+                    approvalState = reader.GetString(4),
+                    checksum = reader.GetString(5),
+                    createdAt = reader.GetString(6)
+                }
+            });
+        }
+
+        return Results.Ok(new
+        {
+            ownerUsername = user.Username,
+            contracts
+        });
+    }
+
+    private static IResult ListPublicContractsByUsername(string username, ServiceOptions options)
+    {
+        username = username.Trim();
+        if (username.Length == 0)
+        {
+            return Results.BadRequest(new { error = "username must not be empty" });
+        }
+
+        using var connection = Database.OpenConnection(options.DbPath);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                u.username,
+                c.public_reference,
+                c.title,
+                c.created_at,
+                v.version_number,
+                v.approval_state,
+                v.checksum,
+                v.created_at
+            FROM users u
+            JOIN contracts c ON c.owner_user_id = u.id
+            JOIN contract_versions v ON v.contract_id = c.id
+            WHERE u.username = $username
+              AND v.version_number = (
+                  SELECT MAX(version_number)
+                  FROM contract_versions
+                  WHERE contract_id = c.id
+              )
+            ORDER BY c.created_at ASC, c.public_reference ASC;
+            """;
+        Database.AddParameter(command, "$username", username);
+
+        var contracts = new List<object>();
+        string? canonicalUsername = null;
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            canonicalUsername ??= reader.GetString(0);
+            contracts.Add(new
+            {
+                reference = reader.GetString(1),
+                title = reader.GetString(2),
+                createdAt = reader.GetString(3),
+                latestVersion = new
+                {
                     versionNumber = reader.GetInt32(4),
                     approvalState = reader.GetString(5),
                     checksum = reader.GetString(6),
@@ -156,16 +222,34 @@ public static class ContractEndpoints
             });
         }
 
+        if (canonicalUsername is null)
+        {
+            using var userExists = connection.CreateCommand();
+            userExists.CommandText = """
+                SELECT username
+                FROM users
+                WHERE username = $username
+                LIMIT 1;
+                """;
+            Database.AddParameter(userExists, "$username", username);
+            canonicalUsername = userExists.ExecuteScalar() as string;
+        }
+
+        if (canonicalUsername is null)
+        {
+            return Results.NotFound(new { error = "user not found" });
+        }
+
         return Results.Ok(new
         {
-            ownerUserId = user.Id,
+            username = canonicalUsername,
             contracts
         });
     }
 
     private static IResult GetLatestContractVersion(
         HttpRequest httpRequest,
-        long contractId,
+        string reference,
         ServiceOptions options)
     {
         using var connection = Database.OpenConnection(options.DbPath);
@@ -185,15 +269,14 @@ public static class ContractEndpoints
          *
          *     c.owner_user_id = authenticated_user_id
          *
-         * Therefore, any logged-in user can enumerate sequential contract IDs
-         * and read other users' latest contract versions.
+         * Therefore, any logged-in user who discovers a public contract reference
+         * can read other users' latest contract versions.
          */
         command.CommandText = """
             SELECT
-                c.id,
-                c.owner_user_id,
+                c.public_reference,
+                u.username,
                 c.title,
-                v.id,
                 v.version_number,
                 v.approval_state,
                 v.file_path,
@@ -201,8 +284,9 @@ public static class ContractEndpoints
                 v.content_text,
                 v.created_at
             FROM contracts c
+            JOIN users u ON u.id = c.owner_user_id
             JOIN contract_versions v ON v.contract_id = c.id
-            WHERE c.id = $contract_id
+            WHERE c.public_reference = $public_reference
               AND v.version_number = (
                   SELECT MAX(version_number)
                   FROM contract_versions
@@ -210,7 +294,7 @@ public static class ContractEndpoints
               )
             LIMIT 1;
             """;
-        Database.AddParameter(command, "$contract_id", contractId);
+        Database.AddParameter(command, "$public_reference", reference);
 
         using var reader = command.ExecuteReader();
         if (!reader.Read())
@@ -218,8 +302,8 @@ public static class ContractEndpoints
             return Results.NotFound(new { error = "contract not found" });
         }
 
-        var storedFilePath = reader.GetString(6);
-        var storedContent = reader.GetString(8);
+        var storedFilePath = reader.GetString(5);
+        var storedContent = reader.GetString(7);
         var content = storedContent.Length > 0
             ? storedContent
             : File.Exists(storedFilePath) && Path.GetExtension(storedFilePath).Equals(".txt", StringComparison.OrdinalIgnoreCase)
@@ -228,23 +312,22 @@ public static class ContractEndpoints
 
         return Results.Ok(new
         {
-            contractId = reader.GetInt64(0),
-            ownerUserId = reader.GetInt64(1),
+            reference = reader.GetString(0),
+            ownerUsername = reader.GetString(1),
             title = reader.GetString(2),
-            versionId = reader.GetInt64(3),
-            versionNumber = reader.GetInt32(4),
-            approvalState = reader.GetString(5),
-            checksum = reader.GetString(7),
-            createdAt = reader.GetString(9),
-            requestedByUserId = user.Id,
+            versionNumber = reader.GetInt32(3),
+            approvalState = reader.GetString(4),
+            checksum = reader.GetString(6),
+            createdAt = reader.GetString(8),
+            requestedByUsername = user.Username,
             content,
-            pdfUrl = $"/api/contracts/{contractId}/versions/latest/pdf"
+            pdfUrl = $"/api/contracts/{Uri.EscapeDataString(reference)}/versions/latest/pdf"
         });
     }
 
     private static IResult GetLatestContractPdf(
         HttpRequest httpRequest,
-        long contractId,
+        string reference,
         ServiceOptions options)
     {
         using var connection = Database.OpenConnection(options.DbPath);
@@ -260,13 +343,13 @@ public static class ContractEndpoints
          * INTENTIONAL CTF VULNERABILITY: IDOR / missing authorization.
          *
          * This mirrors the latest-version JSON endpoint: a valid session is enough
-         * to fetch any generated PDF by contract ID.
+         * to fetch any generated PDF by public contract reference.
          */
         command.CommandText = """
             SELECT v.file_path
             FROM contracts c
             JOIN contract_versions v ON v.contract_id = c.id
-            WHERE c.id = $contract_id
+            WHERE c.public_reference = $public_reference
               AND v.version_number = (
                   SELECT MAX(version_number)
                   FROM contract_versions
@@ -274,7 +357,7 @@ public static class ContractEndpoints
               )
             LIMIT 1;
             """;
-        Database.AddParameter(command, "$contract_id", contractId);
+        Database.AddParameter(command, "$public_reference", reference);
 
         var storedFilePath = command.ExecuteScalar() as string;
         if (storedFilePath is null || !File.Exists(storedFilePath))
@@ -287,6 +370,6 @@ public static class ContractEndpoints
             return Results.NotFound(new { error = "contract PDF not found" });
         }
 
-        return Results.File(storedFilePath, "application/pdf", $"{contractId}-latest.pdf");
+        return Results.File(storedFilePath, "application/pdf", $"{reference}-latest.pdf");
     }
 }
