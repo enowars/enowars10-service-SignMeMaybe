@@ -28,7 +28,7 @@ Thumbs.db
 # Runtime data
 service/data/*
 !service/data/.gitkeep
-checker/data/
+checker/data/*
 
 # Logs and crash dumps
 *.log
