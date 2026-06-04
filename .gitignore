@@ -35,6 +35,5 @@ checker/data/
 *.tgz
 core
 
-# Local temporary planning files
-temp_data_structure.md
-temp_service_design.md
+# Local temporary files
+AGENTS.md

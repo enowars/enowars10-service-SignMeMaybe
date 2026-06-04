@@ -230,7 +230,13 @@ class HttpClient:
         reference = data_obj.get("reference")
 
         if not isinstance(reference, str) or not reference.startswith("CNTR-"):
-            raise MumbleException("Contract creation response did not contain a valid reference")
+            response_keys = ", ".join(sorted(data_obj.keys())) or "<none>"
+            raise MumbleException(
+                "Contract creation response did not contain a valid CNTR reference. "
+                "The target service is not exposing the reference-based contract API; "
+                "rebuild/redeploy the service from current main. "
+                f"Response keys: {response_keys}"
+            )
 
         return reference
 
@@ -390,7 +396,10 @@ async def getflag_contract(
         password = stored["password"]
         reference = stored["reference"]
     except (KeyError, TypeError) as exc:
-        raise MumbleException("Missing or broken database entry from putflag") from exc
+        raise MumbleException(
+            "Missing or broken database entry from putflag; the previous putflag likely failed "
+            "before storing checker state"
+        ) from exc
 
     logger.debug("Logging in as the flag owner")
     _user_id, _username, token = await client.login_user(username, password)
@@ -458,7 +467,10 @@ async def getnoise_contract(
         content = stored["content"]
         reference = stored["reference"]
     except (KeyError, TypeError) as exc:
-        raise MumbleException("Missing or broken database entry from putnoise") from exc
+        raise MumbleException(
+            "Missing or broken database entry from putnoise; the previous putnoise likely failed "
+            "before storing checker state"
+        ) from exc
 
     logger.debug("Logging in as the noise owner")
     _user_id, _username, token = await client.login_user(username, password)
