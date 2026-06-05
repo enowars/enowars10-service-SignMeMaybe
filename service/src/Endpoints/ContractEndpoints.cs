@@ -261,17 +261,6 @@ public static class ContractEndpoints
 
         using var command = connection.CreateCommand();
 
-        /*
-         * INTENTIONAL CTF VULNERABILITY: IDOR / missing authorization.
-         *
-         * This endpoint only checks that the caller has a valid session.
-         * It does NOT check:
-         *
-         *     c.owner_user_id = authenticated_user_id
-         *
-         * Therefore, any logged-in user who discovers a public contract reference
-         * can read other users' latest contract versions.
-         */
         command.CommandText = """
             SELECT
                 c.public_reference,
@@ -339,12 +328,6 @@ public static class ContractEndpoints
 
         using var command = connection.CreateCommand();
 
-        /*
-         * INTENTIONAL CTF VULNERABILITY: IDOR / missing authorization.
-         *
-         * This mirrors the latest-version JSON endpoint: a valid session is enough
-         * to fetch any generated PDF by public contract reference.
-         */
         command.CommandText = """
             SELECT v.file_path
             FROM contracts c
