@@ -20,7 +20,9 @@ public static class RootEndpoints
                 "GET /api/me",
                 "POST /api/contracts",
                 "GET /api/contracts",
+                "GET /api/links/leave",
                 "GET /api/users/{username}/contracts",
+                "GET /api/contracts/{reference}/notary/sealed",
                 "GET /api/contracts/{reference}/versions/latest",
                 "GET /api/contracts/{reference}/versions/latest/pdf"
             }
@@ -42,6 +44,7 @@ public static class RootEndpoints
                 pdfRootExists = Directory.Exists(options.PdfRoot),
                 exportRoot = options.ExportRoot,
                 exportRootExists = Directory.Exists(options.ExportRoot),
+                notaryVaultRootExists = Directory.Exists(options.NotaryVaultRoot),
                 maxUploadBytes = options.MaxUploadBytes
             });
         });

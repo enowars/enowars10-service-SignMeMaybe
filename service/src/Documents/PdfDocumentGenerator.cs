@@ -2,6 +2,11 @@ using System.Text;
 
 namespace SignMeMaybe.Documents;
 
+public sealed record PdfAttachment(
+    string FileName,
+    string MimeType,
+    byte[] Content);
+
 public static class PdfDocumentGenerator
 {
     private const int PageWidth = 612;
@@ -9,7 +14,11 @@ public static class PdfDocumentGenerator
     private const int LinesPerPage = 48;
     private const int MaxLineLength = 88;
 
-    public static void WriteContractPdf(string filePath, string title, string content)
+    public static void WriteContractPdf(
+        string filePath,
+        string title,
+        string content,
+        IReadOnlyList<PdfAttachment>? attachments = null)
     {
         var lines = BuildLines(title, content);
         var pages = lines.Chunk(LinesPerPage).ToList();
@@ -18,7 +27,7 @@ public static class PdfDocumentGenerator
             pages.Add(Array.Empty<string>());
         }
 
-        File.WriteAllBytes(filePath, BuildPdf(pages));
+        File.WriteAllBytes(filePath, BuildPdf(pages, attachments));
     }
 
     private static List<string> BuildLines(string title, string content)
@@ -64,14 +73,25 @@ public static class PdfDocumentGenerator
         yield return remaining;
     }
 
-    private static byte[] BuildPdf(IReadOnlyList<string[]> pages)
+    private static byte[] BuildPdf(
+        IReadOnlyList<string[]> pages,
+        IReadOnlyList<PdfAttachment>? attachments)
     {
         var objects = new List<(int Id, byte[] Bytes)>();
         var pageObjectIds = Enumerable.Range(0, pages.Count)
             .Select(index => 4 + index * 2)
             .ToList();
+        var normalizedAttachments = NormalizeAttachments(attachments);
+        var firstAttachmentObjectId = 4 + pages.Count * 2;
+        var embeddedFilesNameTreeId = normalizedAttachments.Count > 0
+            ? firstAttachmentObjectId + normalizedAttachments.Count * 2
+            : 0;
 
-        objects.Add((1, PdfBytes("<< /Type /Catalog /Pages 2 0 R >>")));
+        var catalog = normalizedAttachments.Count > 0
+            ? $"<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles {embeddedFilesNameTreeId} 0 R >> >>"
+            : "<< /Type /Catalog /Pages 2 0 R >>";
+
+        objects.Add((1, PdfBytes(catalog)));
         objects.Add((2, PdfBytes($"<< /Type /Pages /Kids [{string.Join(" ", pageObjectIds.Select(id => $"{id} 0 R"))}] /Count {pages.Count} >>")));
         objects.Add((3, PdfBytes("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")));
 
@@ -83,6 +103,28 @@ public static class PdfDocumentGenerator
 
             objects.Add((pageObjectId, PdfBytes($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PageWidth} {PageHeight}] /Resources << /Font << /F1 3 0 R >> >> /Contents {contentObjectId} 0 R >>")));
             objects.Add((contentObjectId, PdfBytes($"<< /Length {stream.Length} >>\nstream\n{stream}\nendstream")));
+        }
+
+        if (normalizedAttachments.Count > 0)
+        {
+            var nameEntries = new List<string>();
+            for (var index = 0; index < normalizedAttachments.Count; index++)
+            {
+                var attachment = normalizedAttachments[index];
+                var filespecObjectId = firstAttachmentObjectId + index * 2;
+                var embeddedFileObjectId = filespecObjectId + 1;
+                var fileName = EscapePdfString(attachment.FileName);
+                var subtype = EscapePdfName(attachment.MimeType);
+
+                objects.Add((filespecObjectId, PdfBytes(
+                    $"<< /Type /Filespec /F ({fileName}) /UF ({fileName}) /EF << /F {embeddedFileObjectId} 0 R >> /Desc (Certified contract annex) >>")));
+                objects.Add((embeddedFileObjectId, BuildStreamObject(
+                    $"<< /Type /EmbeddedFile /Subtype /{subtype} /Length {attachment.Content.Length} >>",
+                    attachment.Content)));
+                nameEntries.Add($"({fileName}) {filespecObjectId} 0 R");
+            }
+
+            objects.Add((embeddedFilesNameTreeId, PdfBytes($"<< /Names [{string.Join(" ", nameEntries)}] >>")));
         }
 
         using var output = new MemoryStream();
@@ -146,6 +188,70 @@ public static class PdfDocumentGenerator
             .Replace("\\", "\\\\")
             .Replace("(", "\\(")
             .Replace(")", "\\)");
+    }
+
+    private static byte[] BuildStreamObject(string dictionary, byte[] streamBytes)
+    {
+        using var output = new MemoryStream();
+        WriteAscii(output, dictionary);
+        WriteAscii(output, "\nstream\n");
+        output.Write(streamBytes);
+        WriteAscii(output, "\nendstream");
+        return output.ToArray();
+    }
+
+    private static IReadOnlyList<PdfAttachment> NormalizeAttachments(IReadOnlyList<PdfAttachment>? attachments)
+    {
+        if (attachments is null || attachments.Count == 0)
+        {
+            return Array.Empty<PdfAttachment>();
+        }
+
+        return attachments
+            .Where(attachment => attachment.Content.Length > 0)
+            .Select(attachment => new PdfAttachment(
+                SanitizeAttachmentName(attachment.FileName),
+                string.IsNullOrWhiteSpace(attachment.MimeType)
+                    ? "application/octet-stream"
+                    : attachment.MimeType.Trim(),
+                attachment.Content))
+            .ToList();
+    }
+
+    private static string EscapePdfString(string value)
+    {
+        return value
+            .Replace("\\", "\\\\")
+            .Replace("(", "\\(")
+            .Replace(")", "\\)");
+    }
+
+    private static string EscapePdfName(string value)
+    {
+        return value
+            .Replace("#", "#23")
+            .Replace("/", "#2F")
+            .Replace(" ", "#20");
+    }
+
+    private static string SanitizeAttachmentName(string value)
+    {
+        var name = Path.GetFileName(value.Trim());
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "annex.bin";
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return "annex.bin";
+        }
+
+        return cleaned.Length > 128 ? cleaned[..128] : cleaned;
     }
 
     private static byte[] PdfBytes(string value)

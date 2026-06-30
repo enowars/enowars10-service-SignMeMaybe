@@ -10,6 +10,7 @@
         "SIGNMEMAYBE_DB_PATH": "/tmp/signmemaybe.sqlite3",
         "SIGNMEMAYBE_PDF_ROOT": "/tmp/signmemaybe-pdfs",
         "SIGNMEMAYBE_EXPORT_ROOT": "/tmp/signmemaybe-exports",
+        "SIGNMEMAYBE_NOTARY_VAULT_ROOT": "/tmp/signmemaybe-notary-vault",
         "SIGNMEMAYBE_MAX_UPLOAD_BYTES": "10485760"
       }
     }

@@ -69,6 +69,19 @@ public static class Database
                 UNIQUE(contract_id, version_number)
             );
 
+            CREATE TABLE IF NOT EXISTS notary_secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_user_id INTEGER NOT NULL,
+                contract_id INTEGER NOT NULL,
+                public_stamp TEXT NOT NULL UNIQUE,
+                secret_path TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS annotations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 contract_version_id INTEGER NOT NULL,
@@ -133,6 +146,15 @@ public static class Database
 
             CREATE INDEX IF NOT EXISTS idx_contract_versions_contract
                 ON contract_versions(contract_id);
+
+            CREATE INDEX IF NOT EXISTS idx_notary_secrets_owner
+                ON notary_secrets(owner_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_notary_secrets_contract
+                ON notary_secrets(contract_id);
+
+            CREATE INDEX IF NOT EXISTS idx_notary_secrets_public_stamp
+                ON notary_secrets(public_stamp);
 
             CREATE INDEX IF NOT EXISTS idx_annotations_contract_version
                 ON annotations(contract_version_id);

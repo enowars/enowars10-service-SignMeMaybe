@@ -130,17 +130,33 @@
 
     function renderContractButton(contract) {
         const reference = contract.reference || "";
-        const item = document.createElement("button");
-        item.type = "button";
+        const latestVersion = contract.latestVersion || {};
+        const notaryStamp = contract.notaryStamp
+            ? `<span>Notary stamp ${escapeHtml(contract.notaryStamp)}</span>`
+            : "";
+        const referenceLabel = reference
+            ? `<span>Ref ${escapeHtml(reference)}</span>`
+            : "";
+        const checksumLabel = latestVersion.checksum
+            ? `<span>Checksum ${escapeHtml(latestVersion.checksum)}</span>`
+            : "";
+        const item = document.createElement(reference ? "button" : "article");
+        if (reference) {
+            item.type = "button";
+        }
         item.className = "contract-item";
         item.innerHTML = `
             <strong>${escapeHtml(contract.title)}</strong>
             <span class="meta-row">
-                <span>Ref ${escapeHtml(reference)}</span>
-                <span>Version ${contract.latestVersion.versionNumber}</span>
-                <span>${escapeHtml(contract.latestVersion.approvalState)}</span>
+                ${referenceLabel}
+                <span>Version ${latestVersion.versionNumber}</span>
+                <span>${escapeHtml(latestVersion.approvalState)}</span>
+                ${checksumLabel}
+                ${notaryStamp}
             </span>`;
-        item.addEventListener("click", () => loadContract(reference));
+        if (reference) {
+            item.addEventListener("click", () => loadContract(reference));
+        }
         return item;
     }
 

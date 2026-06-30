@@ -69,6 +69,7 @@ public static class CleanupRunner
 
         deletedFiles += DeleteOldFiles(options.PdfRoot, cutoffUtc, options);
         deletedFiles += DeleteOldFiles(options.ExportRoot, cutoffUtc, options);
+        deletedFiles += DeleteOldFiles(options.NotaryVaultRoot, cutoffUtc, options);
 
         return new CleanupResult(
             deletedFiles,
@@ -94,6 +95,10 @@ public static class CleanupRunner
             UNION
             SELECT file_path
             FROM exports
+            WHERE created_at < $cutoff
+            UNION
+            SELECT secret_path
+            FROM notary_secrets
             WHERE created_at < $cutoff;
             """;
         Database.AddParameter(command, "$cutoff", cutoffText);
@@ -127,9 +132,9 @@ public static class CleanupRunner
             SELECT 1
             FROM sqlite_master
             WHERE type = 'table'
-              AND name IN ('users', 'sessions', 'contracts', 'contract_versions')
+              AND name IN ('users', 'sessions', 'contracts', 'contract_versions', 'notary_secrets')
             GROUP BY type
-            HAVING COUNT(*) = 4;
+            HAVING COUNT(*) = 5;
             """;
 
         return command.ExecuteScalar() is not null;
@@ -190,7 +195,9 @@ public static class CleanupRunner
 
     private static bool IsInManagedRoot(string filePath, ServiceOptions options)
     {
-        return IsUnderRoot(filePath, options.PdfRoot) || IsUnderRoot(filePath, options.ExportRoot);
+        return IsUnderRoot(filePath, options.PdfRoot)
+            || IsUnderRoot(filePath, options.ExportRoot)
+            || IsUnderRoot(filePath, options.NotaryVaultRoot);
     }
 
     private static bool IsDatabaseFile(string filePath, ServiceOptions options)
