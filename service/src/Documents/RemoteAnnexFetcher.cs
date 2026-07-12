@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace SignMeMaybe.Documents;
 
 public static class RemoteAnnexFetcher
@@ -134,11 +136,29 @@ public static class RemoteAnnexFetcher
         }
 
         var host = uri.Host.Trim().Trim('[', ']').ToLowerInvariant();
-        return host is not "localhost"
-            and not "127.0.0.1"
-            and not "::1"
-            and not "0.0.0.0"
-            && !host.StartsWith("127.", StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        if (host == "localhost" || host.EndsWith(".localhost", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !IPAddress.TryParse(host, out var address) || !IsBlockedAddress(address);
+    }
+
+    private static bool IsBlockedAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        return IPAddress.IsLoopback(address)
+            || address.Equals(IPAddress.Any)
+            || address.Equals(IPAddress.IPv6Any);
     }
 
     private static string SafeMimeType(string? value)
