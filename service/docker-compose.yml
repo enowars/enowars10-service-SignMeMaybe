@@ -3,6 +3,13 @@ services:
     build: .
     # The code should be copied into the container using COPY.
     # Mount the data folder writable, so that information can be persisted across restarts.
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     volumes:
       - ./data/:/data:rw
 
@@ -28,8 +35,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cleanup
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./data/:/data:rw
+      - /pcaps:/pcaps:rw
     environment:
       SIGNMEMAYBE_DB_PATH: "/data/signmemaybe.sqlite3"
       SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
@@ -37,6 +50,8 @@ services:
       SIGNMEMAYBE_NOTARY_VAULT_ROOT: "/data/notary-vault"
       SIGNMEMAYBE_MAX_UPLOAD_BYTES: "10485760"
       SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS: "720"
+      SIGNMEMAYBE_PCAP_ROOT: "/pcaps"
+      SIGNMEMAYBE_PCAP_RETENTION_MINUTES: "30"
     depends_on:
       - signmemaybe
     restart: unless-stopped
