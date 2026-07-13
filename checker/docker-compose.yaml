@@ -14,6 +14,7 @@ services:
       - MONGO_PASSWORD=signmemaybe
     mem_limit: 1G
     memswap_limit: 2G
+    restart: unless-stopped
     ulimits:
       core:
         soft: 0
@@ -23,7 +24,7 @@ services:
         hard: 4000
   # The python checkerlib requires a mongo db!
   signmemaybe-mongo:
-    image: mongo
+    image: mongo:7
     #ports:
     #  - 27017:27017
     volumes:
@@ -33,6 +34,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: signmemaybe
     mem_limit: 1G
     memswap_limit: 2G
+    restart: unless-stopped
     ulimits:
       core:
         soft: 0
