@@ -5,3 +5,16 @@ public sealed record RegisterRequest(string Username, string Password);
 public sealed record LoginRequest(string Username, string Password);
 
 public sealed record ContractCreateRequest(string Title, string Content, string? NotarySecret = null);
+
+public sealed record SigningAuthorityCreateRequest(
+    string DisplayName,
+    string? CurveName = null,
+    string? SigningSecret = null);
+
+public sealed record EcPointRequest(string X, string Y);
+
+public sealed record SignatureCeremonyCreateRequest(
+    string Message,
+    string? CurveName = null,
+    EcPointRequest? BasePoint = null,
+    string? ContractReference = null);

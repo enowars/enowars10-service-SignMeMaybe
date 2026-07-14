@@ -18,6 +18,23 @@
         publicLookupForm: document.getElementById("public-lookup-form"),
         publicUsername: document.getElementById("public-username"),
         publicContractList: document.getElementById("public-contract-list"),
+        signingAuthorityForm: document.getElementById("signing-authority-form"),
+        signingDisplayName: document.getElementById("signing-display-name"),
+        signingCurve: document.getElementById("signing-curve"),
+        signingSecret: document.getElementById("signing-secret"),
+        signingAuthorityList: document.getElementById("signing-authority-list"),
+        signingLookupForm: document.getElementById("signing-lookup-form"),
+        signingPublicUsername: document.getElementById("signing-public-username"),
+        signingPublicList: document.getElementById("signing-public-list"),
+        refreshSigningButton: document.getElementById("refresh-signing-button"),
+        signatureCeremonyForm: document.getElementById("signature-ceremony-form"),
+        ceremonyAuthorityId: document.getElementById("ceremony-authority-id"),
+        ceremonyMessage: document.getElementById("ceremony-message"),
+        ceremonyCustomBase: document.getElementById("ceremony-custom-base"),
+        ceremonyBaseFields: document.getElementById("ceremony-base-fields"),
+        ceremonyBaseX: document.getElementById("ceremony-base-x"),
+        ceremonyBaseY: document.getElementById("ceremony-base-y"),
+        ceremonyResult: document.getElementById("ceremony-result"),
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
     };
@@ -38,6 +55,8 @@
         renderSession();
         elements.contractList.innerHTML = '<p class="muted">Log in to load records.</p>';
         elements.contractViewer.innerHTML = '<p class="muted">Select a contract to inspect its latest version.</p>';
+        elements.signingAuthorityList.innerHTML = '<p class="muted">Log in to load signing authorities.</p>';
+        elements.ceremonyResult.innerHTML = '<p class="muted">Start a ceremony to inspect and validate the receipt.</p>';
     }
 
     function renderSession() {
@@ -107,6 +126,7 @@
         setSession(data.username, data.token);
         showMessage(mode === "register" ? "Identity registered." : "Session established.", false);
         await loadContracts();
+        await loadSigningAuthorities();
     }
 
     async function loadContracts() {
@@ -126,6 +146,159 @@
         for (const contract of contracts) {
             elements.contractList.appendChild(renderContractButton(contract));
         }
+    }
+
+    async function loadSigningCurves() {
+        const data = await api("/api/signing/curves");
+        const curves = Array.isArray(data.curves) ? data.curves : [];
+        elements.signingCurve.innerHTML = "";
+        for (const curve of curves) {
+            const option = document.createElement("option");
+            option.value = curve.name;
+            option.textContent = curve.name;
+            elements.signingCurve.appendChild(option);
+        }
+    }
+
+    async function loadSigningAuthorities() {
+        if (!getToken()) {
+            elements.signingAuthorityList.innerHTML = '<p class="muted">Log in to load signing authorities.</p>';
+            return;
+        }
+
+        const data = await api("/api/signing/authorities");
+        const authorities = Array.isArray(data.authorities) ? data.authorities : [];
+        if (authorities.length === 0) {
+            elements.signingAuthorityList.innerHTML = '<p class="muted">No signing authorities registered yet.</p>';
+            return;
+        }
+
+        elements.signingAuthorityList.innerHTML = "";
+        for (const authority of authorities) {
+            elements.signingAuthorityList.appendChild(renderSigningAuthorityButton(authority));
+        }
+    }
+
+    function renderSigningAuthorityButton(authority) {
+        const authorityId = authority.authorityId || "";
+        const secretBlob = authority.secretBlob
+            ? `<span>Secret blob ${escapeHtml(authority.secretBlob)}</span>`
+            : "";
+        const checksum = authority.secretChecksum
+            ? `<span>Secret checksum ${escapeHtml(authority.secretChecksum)}</span>`
+            : "";
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "contract-item";
+        item.innerHTML = `
+            <strong>${escapeHtml(authority.displayName || authorityId)}</strong>
+            <span class="meta-row">
+                <span>Authority ${escapeHtml(authorityId)}</span>
+                <span>Curve ${escapeHtml(authority.curveName || "")}</span>
+                ${checksum}
+                ${secretBlob}
+            </span>`;
+        item.addEventListener("click", () => {
+            elements.ceremonyAuthorityId.value = authorityId;
+            if (authority.curveName) {
+                elements.signingCurve.value = authority.curveName;
+            }
+            showMessage("Signing authority selected.", false);
+        });
+        return item;
+    }
+
+    async function createSigningAuthority(event) {
+        event.preventDefault();
+        const displayName = elements.signingDisplayName.value.trim();
+        const curveName = elements.signingCurve.value;
+        const signingSecret = elements.signingSecret.value;
+        const body = { displayName, curveName };
+        if (signingSecret.length > 0) {
+            body.signingSecret = signingSecret;
+        }
+
+        await api("/api/signing/authorities", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+
+        elements.signingAuthorityForm.reset();
+        showMessage("Signing authority registered.", false);
+        await loadSigningAuthorities();
+    }
+
+    async function lookupPublicSigningAuthorities(event) {
+        event.preventDefault();
+        const username = elements.signingPublicUsername.value.trim();
+        const data = await api(`/api/users/${encodeURIComponent(username)}/signing-authorities`);
+        const authorities = Array.isArray(data.authorities) ? data.authorities : [];
+
+        if (authorities.length === 0) {
+            elements.signingPublicList.innerHTML = '<p class="muted">No public signing authorities found for this holder.</p>';
+            return;
+        }
+
+        elements.signingPublicList.innerHTML = "";
+        for (const authority of authorities) {
+            elements.signingPublicList.appendChild(renderSigningAuthorityButton(authority));
+        }
+    }
+
+    async function createSignatureCeremony(event) {
+        event.preventDefault();
+        const authorityId = elements.ceremonyAuthorityId.value.trim();
+        const body = {
+            message: elements.ceremonyMessage.value,
+            curveName: elements.signingCurve.value
+        };
+
+        if (elements.ceremonyCustomBase.checked) {
+            body.basePoint = {
+                x: elements.ceremonyBaseX.value.trim(),
+                y: elements.ceremonyBaseY.value.trim()
+            };
+        }
+
+        const ceremony = await api(`/api/signing/authorities/${encodeURIComponent(authorityId)}/ceremonies`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+
+        renderCeremonyResult(ceremony);
+        showMessage("Server-side signature ceremony completed.", false);
+    }
+
+    function renderCeremonyResult(ceremony) {
+        const signature = ceremony.signaturePoint && ceremony.signaturePoint.infinity
+            ? "infinity"
+            : `${ceremony.signaturePoint.x}, ${ceremony.signaturePoint.y}`;
+        elements.ceremonyResult.innerHTML = `
+            <h3>Receipt ${escapeHtml(ceremony.ceremonyId)}</h3>
+            <div class="meta-row">
+                <span><strong>Authority:</strong> ${escapeHtml(ceremony.authorityId)}</span>
+                <span><strong>Curve:</strong> ${escapeHtml(ceremony.curveName)}</span>
+                <span><strong>Status:</strong> ${escapeHtml(ceremony.validationState)}</span>
+            </div>
+            <p><strong>Signature point:</strong> <code>${escapeHtml(signature)}</code></p>
+            <p><strong>Receipt tag:</strong> <code>${escapeHtml(ceremony.receiptTag)}</code></p>
+            <button type="button" id="validate-ceremony-button" class="secondary">Validate on server</button>`;
+
+        document.getElementById("validate-ceremony-button").addEventListener("click", async function () {
+            try {
+                const validation = await api(`/api/signing/ceremonies/${encodeURIComponent(ceremony.ceremonyId)}/validate`, {
+                    method: "POST"
+                });
+                showMessage(validation.valid ? "Receipt validated." : "Receipt rejected.", !validation.valid);
+                elements.ceremonyResult.querySelector(".meta-row").innerHTML = `
+                    <span><strong>Authority:</strong> ${escapeHtml(validation.authorityId)}</span>
+                    <span><strong>Status:</strong> ${escapeHtml(validation.validationState)}</span>`;
+            } catch (error) {
+                showMessage(error.message, true);
+            }
+        });
     }
 
     function renderContractButton(contract) {
@@ -280,6 +453,37 @@
         }
     });
 
+    elements.signingAuthorityForm.addEventListener("submit", async function (event) {
+        try {
+            await createSigningAuthority(event);
+        } catch (error) {
+            event.preventDefault();
+            showMessage(error.message, true);
+        }
+    });
+
+    elements.signingLookupForm.addEventListener("submit", async function (event) {
+        try {
+            await lookupPublicSigningAuthorities(event);
+        } catch (error) {
+            event.preventDefault();
+            showMessage(error.message, true);
+        }
+    });
+
+    elements.signatureCeremonyForm.addEventListener("submit", async function (event) {
+        try {
+            await createSignatureCeremony(event);
+        } catch (error) {
+            event.preventDefault();
+            showMessage(error.message, true);
+        }
+    });
+
+    elements.ceremonyCustomBase.addEventListener("change", function () {
+        elements.ceremonyBaseFields.classList.toggle("hidden", !elements.ceremonyCustomBase.checked);
+    });
+
     elements.refreshButton.addEventListener("click", async function () {
         try {
             await loadContracts();
@@ -288,8 +492,18 @@
         }
     });
 
+    elements.refreshSigningButton.addEventListener("click", async function () {
+        try {
+            await loadSigningAuthorities();
+        } catch (error) {
+            showMessage(error.message, true);
+        }
+    });
+
     renderSession();
+    loadSigningCurves().catch(error => showMessage(error.message, true));
     if (getToken()) {
         loadContracts().catch(error => showMessage(error.message, true));
+        loadSigningAuthorities().catch(error => showMessage(error.message, true));
     }
 })();

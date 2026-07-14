@@ -32,6 +32,16 @@ public static class CleanupRunner
             transaction,
             "DELETE FROM sessions WHERE created_at < $cutoff;",
             cutoffText);
+        ExecuteDelete(
+            connection,
+            transaction,
+            "DELETE FROM signature_ceremonies WHERE created_at < $cutoff;",
+            cutoffText);
+        ExecuteDelete(
+            connection,
+            transaction,
+            "DELETE FROM signing_authorities WHERE created_at < $cutoff;",
+            cutoffText);
         var deletedContracts = ExecuteDelete(
             connection,
             transaction,
@@ -52,6 +62,11 @@ public static class CleanupRunner
                   SELECT 1
                   FROM contracts
                   WHERE contracts.owner_user_id = users.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM signing_authorities
+                  WHERE signing_authorities.owner_user_id = users.id
               );
             """,
             cutoffText);
@@ -132,9 +147,17 @@ public static class CleanupRunner
             SELECT 1
             FROM sqlite_master
             WHERE type = 'table'
-              AND name IN ('users', 'sessions', 'contracts', 'contract_versions', 'notary_secrets')
+              AND name IN (
+                  'users',
+                  'sessions',
+                  'contracts',
+                  'contract_versions',
+                  'notary_secrets',
+                  'signing_authorities',
+                  'signature_ceremonies'
+              )
             GROUP BY type
-            HAVING COUNT(*) = 5;
+            HAVING COUNT(*) = 7;
             """;
 
         return command.ExecuteScalar() is not null;

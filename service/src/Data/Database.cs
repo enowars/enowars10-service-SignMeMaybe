@@ -127,6 +127,41 @@ public static class Database
                 FOREIGN KEY (signer_user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS signing_authorities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                owner_user_id INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                curve_name TEXT NOT NULL,
+                private_scalar TEXT NOT NULL,
+                public_key_x TEXT NOT NULL,
+                public_key_y TEXT NOT NULL,
+                secret_blob TEXT,
+                secret_checksum TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS signature_ceremonies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                authority_id INTEGER NOT NULL,
+                requester_user_id INTEGER NOT NULL,
+                contract_reference TEXT,
+                message TEXT NOT NULL,
+                curve_name TEXT NOT NULL,
+                base_point_x TEXT NOT NULL,
+                base_point_y TEXT NOT NULL,
+                signature_point_x TEXT,
+                signature_point_y TEXT,
+                signature_point_infinity INTEGER NOT NULL DEFAULT 0,
+                receipt_tag TEXT NOT NULL,
+                validation_state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (authority_id) REFERENCES signing_authorities(id) ON DELETE CASCADE,
+                FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS exports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 contract_version_id INTEGER NOT NULL,
@@ -167,6 +202,21 @@ public static class Database
 
             CREATE INDEX IF NOT EXISTS idx_signature_requests_signer
                 ON signature_requests(signer_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signing_authorities_owner
+                ON signing_authorities(owner_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signing_authorities_public_id
+                ON signing_authorities(public_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_authority
+                ON signature_ceremonies(authority_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_requester
+                ON signature_ceremonies(requester_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_public_id
+                ON signature_ceremonies(public_id);
 
             CREATE INDEX IF NOT EXISTS idx_exports_contract_version
                 ON exports(contract_version_id);

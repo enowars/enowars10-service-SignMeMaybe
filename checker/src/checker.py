@@ -36,6 +36,20 @@ EXPECTED_FLAG_RE = re.compile(rf"^{EXPECTED_FLAG_FORMAT}$")
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
 
+SIGNING_CURVE_NAME = "civic-archive-p256k"
+SIGNING_P = 0x10001
+SIGNING_A = 0x02
+SIGNING_SCALAR_BYTES = 6
+SIGNING_SCALAR_LIMIT = 1 << (SIGNING_SCALAR_BYTES * 8)
+SIGNING_ATTACK_POINTS = [
+    (251, 0x9b70, 0xdbda),
+    (257, 0x562d, 0x7727),
+    (263, 0x63f0, 0xfaba),
+    (269, 0x2c81, 0x692a),
+    (271, 0xfc9d, 0xc783),
+    (277, 0x71, 0xfe95),
+]
+
 
 """
 Utility functions
@@ -337,6 +351,93 @@ class HttpClient:
             token=token,
         )
 
+    async def create_signing_authority(
+        self,
+        token: str,
+        display_name: str,
+        signing_secret: str | None = None,
+        curve_name: str = SIGNING_CURVE_NAME,
+    ) -> JsonObject:
+        body: JsonObject = {
+            "displayName": display_name,
+            "curveName": curve_name,
+        }
+        if signing_secret is not None:
+            body["signingSecret"] = signing_secret
+
+        status, data = await self.request_json(
+            "POST",
+            "/api/signing/authorities",
+            body,
+            token=token,
+        )
+        if status not in (200, 201):
+            raise MumbleException(f"Failed to create signing authority: HTTP {status}")
+
+        data_obj = require_json_object(data, "signing authority creation response")
+        authority_id = data_obj.get("authorityId")
+        if not isinstance(authority_id, str) or not authority_id.startswith("SIG-"):
+            raise MumbleException("Signing authority response did not contain a valid authorityId")
+
+        return data_obj
+
+    async def list_signing_authorities(self, token: str) -> list[JsonObject]:
+        status, data = await self.request_json("GET", "/api/signing/authorities", token=token)
+        if status != 200:
+            raise MumbleException(f"Failed to list signing authorities: HTTP {status}")
+
+        data_obj = require_json_object(data, "signing authority list response")
+        authorities = data_obj.get("authorities")
+        if not isinstance(authorities, list):
+            raise MumbleException("Signing authority list response did not contain an authorities list")
+
+        return [authority for authority in authorities if isinstance(authority, dict)]
+
+    async def public_signing_authorities_by_username(self, username: str) -> tuple[int, Any]:
+        return await self.request_json(
+            "GET",
+            f"/api/users/{username}/signing-authorities",
+        )
+
+    async def signing_secret(self, token: str, authority_id: str) -> tuple[int, Any]:
+        return await self.request_json(
+            "GET",
+            f"/api/signing/authorities/{authority_id}/secret",
+            token=token,
+        )
+
+    async def create_signature_ceremony(
+        self,
+        token: str,
+        authority_id: str,
+        message: str,
+        base_point: tuple[int, int] | None = None,
+        curve_name: str = SIGNING_CURVE_NAME,
+    ) -> tuple[int, Any]:
+        body: JsonObject = {
+            "message": message,
+            "curveName": curve_name,
+        }
+        if base_point is not None:
+            body["basePoint"] = {
+                "x": hex(base_point[0]),
+                "y": hex(base_point[1]),
+            }
+
+        return await self.request_json(
+            "POST",
+            f"/api/signing/authorities/{authority_id}/ceremonies",
+            body,
+            token=token,
+        )
+
+    async def validate_signature_ceremony(self, token: str, ceremony_id: str) -> tuple[int, Any]:
+        return await self.request_json(
+            "POST",
+            f"/api/signing/ceremonies/{ceremony_id}/validate",
+            token=token,
+        )
+
 
 def make_client(task: Any, logger: LoggerAdapter) -> HttpClient:
     return HttpClient(service_base_url(task), logger)
@@ -382,6 +483,102 @@ def public_contract_checksum(contract: JsonObject) -> str | None:
         return None
 
     return normalize_checksum(latest_version.get("checksum"))
+
+
+EcPoint = tuple[int, int] | None
+
+
+def ec_inverse(value: int) -> int:
+    return pow(value % SIGNING_P, -1, SIGNING_P)
+
+
+def ec_add(left: EcPoint, right: EcPoint) -> EcPoint:
+    if left is None:
+        return right
+    if right is None:
+        return left
+
+    x1, y1 = left
+    x2, y2 = right
+    if x1 == x2 and (y1 + y2) % SIGNING_P == 0:
+        return None
+
+    if left == right:
+        if y1 % SIGNING_P == 0:
+            return None
+        slope = ((3 * x1 * x1 + SIGNING_A) * ec_inverse(2 * y1)) % SIGNING_P
+    else:
+        slope = ((y2 - y1) * ec_inverse(x2 - x1)) % SIGNING_P
+
+    x3 = (slope * slope - x1 - x2) % SIGNING_P
+    y3 = (slope * (x1 - x3) - y1) % SIGNING_P
+    return x3, y3
+
+
+def ec_multiply(scalar: int, point: EcPoint) -> EcPoint:
+    result: EcPoint = None
+    addend = point
+    while scalar > 0:
+        if scalar & 1:
+            result = ec_add(result, addend)
+        addend = ec_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def parse_service_point(value: Any) -> EcPoint:
+    if not isinstance(value, dict):
+        raise MumbleException("Signature ceremony response did not contain a point object")
+    if value.get("infinity") is True:
+        return None
+
+    x = value.get("x")
+    y = value.get("y")
+    if not isinstance(x, str) or not isinstance(y, str):
+        raise MumbleException("Signature ceremony response point was incomplete")
+
+    return int(x, 16), int(y, 16)
+
+
+def discrete_log_small_order(base_point: EcPoint, target: EcPoint, order: int) -> int:
+    current: EcPoint = None
+    for scalar in range(order):
+        if current == target:
+            return scalar
+        current = ec_add(current, base_point)
+
+    raise MumbleException(f"Could not resolve small-order signing residue modulo {order}")
+
+
+def crt_pair(left_value: int, left_modulus: int, right_value: int, right_modulus: int) -> tuple[int, int]:
+    factor = ((right_value - left_value) * pow(left_modulus, -1, right_modulus)) % right_modulus
+    modulus = left_modulus * right_modulus
+    return (left_value + left_modulus * factor) % modulus, modulus
+
+
+def crt(residues: list[tuple[int, int]]) -> int:
+    value, modulus = residues[0]
+    for residue, next_modulus in residues[1:]:
+        value, modulus = crt_pair(value, modulus, residue, next_modulus)
+    return value
+
+
+def decrypt_signing_secret(authority_id: str, scalar: int, secret_blob: str) -> bytes:
+    parts = secret_blob.split(":")
+    if len(parts) != 3 or parts[0] != "v1":
+        raise MumbleException("Public signing secret blob had an unsupported format")
+
+    nonce_hex = parts[1]
+    ciphertext = bytes.fromhex(parts[2])
+    scalar_hex = scalar.to_bytes(SIGNING_SCALAR_BYTES, "big").hex()
+    output = bytearray()
+    counter = 0
+    while len(output) < len(ciphertext):
+        material = f"SignMeMaybe signing secret:{authority_id}:{scalar_hex}:{nonce_hex}:{counter}".encode("utf-8")
+        output.extend(hashlib.sha256(material).digest())
+        counter += 1
+
+    return bytes(cipher ^ stream for cipher, stream in zip(ciphertext, output))
 
 
 def extract_usernames_from_hints(task: ExploitCheckerTaskMessage) -> list[str]:
@@ -693,6 +890,115 @@ async def getflag_notary_contract(
         raise MumbleException("Stored notary contract PDF had the wrong content type")
     if task.flag.encode("utf-8") in pdf_bytes:
         raise MumbleException("Sealed record appeared in the ordinary contract PDF")
+
+
+@checker.putflag(2)
+async def putflag_signing_authority(
+    task: PutflagCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> str:
+    client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
+
+    username = random_username()
+    password = random_password()
+    display_name = "Civic Signing Authority " + random_suffix(12)
+
+    logger.debug("Registering signing flag owner")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating signing authority with private signing note")
+    created = await client.create_signing_authority(token, display_name, signing_secret=task.flag)
+    authority_id = get_string_field(created, "authorityId", "signing authority creation response")
+    secret_blob = get_string_field(created, "secretBlob", "signing authority creation response")
+
+    logger.debug("Checking that the signing authority is present in the owner's list")
+    authorities = await client.list_signing_authorities(token)
+    listed_authorities = [authority.get("authorityId") for authority in authorities]
+    assert_in(authority_id, listed_authorities, "Created signing authority was not visible in the owner's list")
+
+    await db.set(
+        "signing_authority",
+        {
+            "username": username,
+            "password": password,
+            "displayName": display_name,
+            "authorityId": authority_id,
+            "secretBlob": secret_blob,
+        },
+    )
+
+    return username
+
+
+@checker.getflag(2)
+async def getflag_signing_authority(
+    task: GetflagCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+    log_unexpected_flag_format(task.flag, logger)
+
+    try:
+        stored = await db.get("signing_authority")
+        username = stored["username"]
+        password = stored["password"]
+        authority_id = stored["authorityId"]
+        secret_blob = stored["secretBlob"]
+    except (KeyError, TypeError) as exc:
+        raise MumbleException(
+            "Missing or broken database entry from putflag; the previous putflag likely failed "
+            "before storing checker state"
+        ) from exc
+
+    logger.debug("Logging in as the signing authority owner")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Retrieving owner-only signing secret")
+    status, data = await client.signing_secret(token, authority_id)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve signing secret: HTTP {status}")
+    data_obj = require_json_object(data, "signing secret response")
+    assert_equals(data_obj.get("secret"), task.flag, "Signing secret content was incorrect")
+
+    logger.debug("Checking public signing metadata")
+    status, public_data = await client.public_signing_authorities_by_username(username)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve public signing metadata: HTTP {status}")
+    public_obj = require_json_object(public_data, "public signing metadata response")
+    public_authorities = public_obj.get("authorities")
+    if not isinstance(public_authorities, list):
+        raise MumbleException("Public signing metadata did not contain an authorities list")
+
+    matching = [
+        authority for authority in public_authorities
+        if isinstance(authority, dict) and authority.get("authorityId") == authority_id
+    ]
+    if not matching:
+        raise MumbleException("Signing authority was missing from public metadata")
+    if task.flag in json.dumps(matching[0], ensure_ascii=False):
+        raise MumbleException("Signing secret appeared in public metadata")
+    assert_equals(matching[0].get("secretBlob"), secret_blob, "Public signing secret blob was incorrect")
+
+    logger.debug("Creating and validating normal server-side signature ceremony")
+    status, ceremony_data = await client.create_signature_ceremony(
+        token,
+        authority_id,
+        "archive approval " + random_suffix(16),
+    )
+    if status not in (200, 201):
+        raise MumbleException(f"Could not create signature ceremony: HTTP {status}")
+    ceremony_obj = require_json_object(ceremony_data, "signature ceremony response")
+    ceremony_id = get_string_field(ceremony_obj, "ceremonyId", "signature ceremony response")
+
+    status, validation_data = await client.validate_signature_ceremony(token, ceremony_id)
+    if status != 200:
+        raise MumbleException(f"Could not validate signature ceremony: HTTP {status}")
+    validation_obj = require_json_object(validation_data, "signature validation response")
+    if validation_obj.get("valid") is not True:
+        raise MumbleException("Normal server-side signature ceremony did not validate")
 
 
 @checker.putnoise(0)
@@ -1031,6 +1337,84 @@ async def exploit_annex_notary(
                 continue
 
             if flag := searcher.search_flag(pdf_bytes):
+                return flag
+
+    raise MumbleException("flag not found")
+
+
+@checker.exploit(2)
+async def exploit_faulty_curve_signing(
+    task: ExploitCheckerTaskMessage,
+    searcher: FlagSearcher,
+    logger: LoggerAdapter,
+) -> Optional[str]:
+    client = make_client(task, logger)
+
+    username = random_username()
+    password = random_password()
+
+    logger.debug("Registering attacker account")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    target_usernames = extract_usernames_from_hints(task)
+    if not target_usernames:
+        raise MumbleException("exploit did not receive a target username")
+
+    logger.debug("Resolving %d target usernames via public signing metadata", len(target_usernames))
+    for target_username in target_usernames:
+        status, data = await client.public_signing_authorities_by_username(target_username)
+
+        if status == 404:
+            continue
+        if status != 200:
+            logger.debug("Skipping username %s because signing metadata returned HTTP %s", target_username, status)
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        authorities = data.get("authorities")
+        if not isinstance(authorities, list):
+            continue
+
+        for authority in authorities:
+            if not isinstance(authority, dict):
+                continue
+
+            authority_id = authority.get("authorityId")
+            secret_blob = authority.get("secretBlob")
+            curve_name = authority.get("curveName")
+            if not isinstance(authority_id, str) or not isinstance(secret_blob, str):
+                continue
+            if curve_name != SIGNING_CURVE_NAME:
+                continue
+
+            residues: list[tuple[int, int]] = []
+            for order, x, y in SIGNING_ATTACK_POINTS:
+                status, ceremony_data = await client.create_signature_ceremony(
+                    token,
+                    authority_id,
+                    "fault review " + random_suffix(16),
+                    base_point=(x, y),
+                )
+                if status not in (200, 201):
+                    logger.debug("Faulty signing point was rejected with HTTP %s", status)
+                    residues = []
+                    break
+
+                ceremony_obj = require_json_object(ceremony_data, "faulty signature ceremony response")
+                signature_point = parse_service_point(ceremony_obj.get("signaturePoint"))
+                residue = discrete_log_small_order((x, y), signature_point, order)
+                residues.append((residue, order))
+
+            if not residues:
+                continue
+
+            private_scalar = crt(residues)
+            if not (0 < private_scalar < SIGNING_SCALAR_LIMIT):
+                continue
+
+            secret_bytes = decrypt_signing_secret(authority_id, private_scalar, secret_blob)
+            if flag := searcher.search_flag(secret_bytes):
                 return flag
 
     raise MumbleException("flag not found")

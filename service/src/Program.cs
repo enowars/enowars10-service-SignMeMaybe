@@ -60,6 +60,7 @@ app.MapRootEndpoints(options);
 app.MapAuthEndpoints(options);
 app.MapContractEndpoints(options);
 app.MapInternalNotaryEndpoints(options);
+app.MapSigningEndpoints(options);
 app.MapRazorPages();
 
 app.Run();

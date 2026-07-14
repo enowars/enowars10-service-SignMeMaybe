@@ -109,6 +109,84 @@
                 </div>
             </section>
 
+            <section class="panel signing-panel" aria-labelledby="signing-title">
+                <div class="panel-header split">
+                    <div>
+                        <p class="eyebrow">Signing desk</p>
+                        <h2 id="signing-title">Signature ceremonies</h2>
+                    </div>
+                    <button type="button" id="refresh-signing-button" class="icon-button" title="Refresh signing desk" aria-label="Refresh signing desk">↻</button>
+                </div>
+
+                <div class="desk-grid">
+                    <form id="signing-authority-form" class="stack desk-section">
+                        <h3>Create signing authority</h3>
+                        <label>
+                            Display name
+                            <input id="signing-display-name" name="signingDisplayName" maxlength="120" required />
+                        </label>
+                        <label>
+                            Curve profile
+                            <select id="signing-curve" name="signingCurve"></select>
+                        </label>
+                        <label>
+                            Private signing note
+                            <textarea id="signing-secret" name="signingSecret" rows="4"></textarea>
+                        </label>
+                        <button type="submit">Create authority</button>
+                    </form>
+
+                    <div class="stack desk-section">
+                        <h3>My signing authorities</h3>
+                        <div id="signing-authority-list" class="contract-list" aria-live="polite">
+                            <p class="muted">Log in to load signing authorities.</p>
+                        </div>
+                    </div>
+
+                    <form id="signing-lookup-form" class="stack desk-section">
+                        <h3>Public signing registry</h3>
+                        <label>
+                            Holder username
+                            <input id="signing-public-username" name="signingPublicUsername" autocomplete="off" minlength="3" maxlength="40" required />
+                        </label>
+                        <button type="submit" class="secondary">Search authorities</button>
+                        <div id="signing-public-list" class="contract-list public-contract-list" aria-live="polite">
+                            <p class="muted">Search a holder name to inspect public signing authorities.</p>
+                        </div>
+                    </form>
+
+                    <form id="signature-ceremony-form" class="stack desk-section">
+                        <h3>Start ceremony</h3>
+                        <label>
+                            Authority ID
+                            <input id="ceremony-authority-id" name="ceremonyAuthorityId" autocomplete="off" required />
+                        </label>
+                        <label>
+                            Message
+                            <textarea id="ceremony-message" name="ceremonyMessage" rows="4" required></textarea>
+                        </label>
+                        <label class="checkbox-row">
+                            <input id="ceremony-custom-base" name="ceremonyCustomBase" type="checkbox" />
+                            Custom base point
+                        </label>
+                        <div id="ceremony-base-fields" class="inline-fields hidden">
+                            <label>
+                                Base X
+                                <input id="ceremony-base-x" name="ceremonyBaseX" autocomplete="off" />
+                            </label>
+                            <label>
+                                Base Y
+                                <input id="ceremony-base-y" name="ceremonyBaseY" autocomplete="off" />
+                            </label>
+                        </div>
+                        <button type="submit">Sign on server</button>
+                        <article id="ceremony-result" class="result-box">
+                            <p class="muted">Start a ceremony to inspect and validate the receipt.</p>
+                        </article>
+                    </form>
+                </div>
+            </section>
+
             <section class="panel viewer-panel" aria-labelledby="viewer-title">
                 <div class="panel-header">
                     <p class="eyebrow">Document viewer</p>

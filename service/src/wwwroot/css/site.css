@@ -32,6 +32,7 @@ body {
 
 button,
 input,
+select,
 textarea {
     font: inherit;
 }
@@ -90,6 +91,7 @@ label {
 }
 
 input,
+select,
 textarea {
     background: #071013;
     border: 1px solid var(--line);
@@ -208,6 +210,10 @@ h3 {
     grid-column: span 2;
 }
 
+.signing-panel {
+    grid-column: span 3;
+}
+
 .panel-header {
     border-bottom: 1px solid var(--line);
     margin-bottom: 1rem;
@@ -229,6 +235,38 @@ h3 {
     display: grid;
     gap: 0.6rem;
     grid-template-columns: 1fr 1fr;
+}
+
+.desk-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.desk-section {
+    align-content: start;
+    border-top: 1px solid var(--line);
+    padding-top: 0.9rem;
+}
+
+.desk-section h3 {
+    margin-bottom: 0.2rem;
+}
+
+.inline-fields {
+    display: grid;
+    gap: 0.7rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.checkbox-row {
+    align-items: center;
+    display: flex;
+    gap: 0.55rem;
+}
+
+.checkbox-row input {
+    width: auto;
 }
 
 .session-card {
@@ -308,6 +346,21 @@ h3 {
     white-space: pre-wrap;
 }
 
+.result-box {
+    background: #071013;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: #d8e7e2;
+    min-height: 7rem;
+    overflow-wrap: anywhere;
+    padding: 0.85rem;
+}
+
+.result-box code {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
 .pdf-link {
     display: inline-block;
     margin-top: 1rem;
@@ -352,6 +405,10 @@ h3 {
     .viewer-panel {
         grid-column: span 2;
     }
+
+    .signing-panel {
+        grid-column: span 2;
+    }
 }
 
 @media (max-width: 720px) {
@@ -369,7 +426,16 @@ h3 {
         grid-column: auto;
     }
 
+    .signing-panel {
+        grid-column: auto;
+    }
+
     .button-row {
+        grid-template-columns: 1fr;
+    }
+
+    .desk-grid,
+    .inline-fields {
         grid-template-columns: 1fr;
     }
 }
