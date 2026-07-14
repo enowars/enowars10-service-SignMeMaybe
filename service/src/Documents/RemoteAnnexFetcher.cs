@@ -21,7 +21,6 @@ public static class RemoteAnnexFetcher
 
         using var handler = new HttpClientHandler
         {
-            AllowAutoRedirect = true,
             MaxAutomaticRedirections = 5
         };
         using var client = new HttpClient(handler)

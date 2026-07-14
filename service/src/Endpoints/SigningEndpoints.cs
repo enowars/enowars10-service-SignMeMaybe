@@ -14,7 +14,6 @@ public static class SigningEndpoints
 {
     private const int MaxSigningSecretBytes = 4096;
     private const int MaxCeremonyMessageBytes = 1024;
-    private const bool RequireBasePointOnCurve = false;
 
     public static void MapSigningEndpoints(this WebApplication app, ServiceOptions options)
     {
@@ -293,11 +292,6 @@ public static class SigningEndpoints
         if (!TryReadBasePoint(curve, request.BasePoint, out var basePoint, out var pointError))
         {
             return Results.BadRequest(new { error = pointError });
-        }
-
-        if (RequireBasePointOnCurve && !curve.IsOnCurve(basePoint))
-        {
-            return Results.BadRequest(new { error = "basePoint must lie on the selected curve" });
         }
 
         var privateScalar = EcCurve.ParseHex(authority.PrivateScalar);

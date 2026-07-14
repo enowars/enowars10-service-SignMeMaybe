@@ -302,9 +302,7 @@ class HttpClient:
         if not isinstance(reference, str) or not reference.startswith("CNTR-"):
             response_keys = ", ".join(sorted(data_obj.keys())) or "<none>"
             raise MumbleException(
-                "Contract creation response did not contain a valid CNTR reference. "
-                "The target service is not exposing the reference-based contract API; "
-                "rebuild/redeploy the service from current main. "
+                "Contract creation response had an unexpected record identifier. "
                 f"Response keys: {response_keys}"
             )
 
@@ -551,7 +549,7 @@ def discrete_log_small_order(base_point: EcPoint, target: EcPoint, order: int) -
             return scalar
         current = ec_add(current, base_point)
 
-    raise MumbleException(f"Could not resolve small-order signing residue modulo {order}")
+    raise MumbleException("Could not resolve signature ceremony response")
 
 
 def crt_pair(left_value: int, left_modulus: int, right_value: int, right_modulus: int) -> tuple[int, int]:
@@ -570,7 +568,7 @@ def crt(residues: list[tuple[int, int]]) -> int:
 def decrypt_signing_secret(authority_id: str, scalar: int, secret_blob: str) -> bytes:
     parts = secret_blob.split(":")
     if len(parts) != 3 or parts[0] != "v1":
-        raise MumbleException("Public signing secret blob had an unsupported format")
+        raise MumbleException("Public signing metadata had an unsupported format")
 
     nonce_hex = parts[1]
     ciphertext = bytes.fromhex(parts[2])
@@ -680,7 +678,7 @@ async def putflag_idor_contract(
     checksum = get_string_field(created, "checksum", "contract creation response")
     derived_reference = reference_from_public_metadata(username, title, checksum)
     if derived_reference != reference:
-        raise MumbleException("Contract reference was not derived from public contract metadata")
+        raise MumbleException("Contract creation metadata validation failed")
 
     logger.debug("Creating IDOR decoy contracts")
     decoy_references: list[str] = []
@@ -783,19 +781,19 @@ async def getflag_idor_contract(
         if not isinstance(contract, dict):
             continue
         if "reference" in contract:
-            raise MumbleException("Public metadata exposed a direct contract reference")
+            raise MumbleException("Public metadata contained an unexpected record field")
         public_contract_objects.append(contract)
         if contract.get("title") == title and public_contract_checksum(contract) == checksum:
             matching_public_contracts.append(contract)
 
     if len(public_contract_objects) < 4:
-        raise MumbleException("Vuln 0 decoy contracts were missing from public metadata")
+        raise MumbleException("Contract metadata entries were missing from public metadata")
     if not matching_public_contracts:
-        raise MumbleException("Flag contract title/checksum pair was not visible in public metadata")
+        raise MumbleException("Contract metadata entry was not visible in public metadata")
     assert_equals(
         reference_from_public_contract(username, matching_public_contracts[0]),
         reference,
-        "Flag contract reference was not derivable from public metadata",
+        "Contract metadata validation failed",
     )
 
 
@@ -868,9 +866,9 @@ async def getflag_notary_contract(
     logger.debug("Retrieving own sealed notary record")
     status, sealed_bytes, _headers = await client.sealed_record(token, reference)
     if status != 200:
-        raise MumbleException(f"Could not retrieve sealed record: HTTP {status}")
+        raise MumbleException(f"Could not retrieve private package: HTTP {status}")
     if sealed_bytes != task.flag.encode("utf-8"):
-        raise MumbleException("Sealed record content was incorrect")
+        raise MumbleException("Private package content was incorrect")
 
     logger.debug("Retrieving own latest notary contract version")
     status, data = await client.latest_contract_version(token, reference)
@@ -883,7 +881,7 @@ async def getflag_notary_contract(
     if latest_content != content:
         raise MumbleException("Stored public notary contract content was incorrect")
     if task.flag in json.dumps(data_obj, ensure_ascii=False):
-        raise MumbleException("Sealed record appeared in latest contract metadata")
+        raise MumbleException("Private package data appeared in public metadata")
 
     logger.debug("Retrieving own latest notary contract PDF")
     status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
@@ -893,7 +891,7 @@ async def getflag_notary_contract(
     if "application/pdf" not in content_type:
         raise MumbleException("Stored notary contract PDF had the wrong content type")
     if task.flag.encode("utf-8") in pdf_bytes:
-        raise MumbleException("Sealed record appeared in the ordinary contract PDF")
+        raise MumbleException("Private package data appeared in the public PDF")
 
 
 @checker.putflag(2)
@@ -963,9 +961,9 @@ async def getflag_signing_authority(
     logger.debug("Retrieving owner-only signing secret")
     status, data = await client.signing_secret(token, authority_id)
     if status != 200:
-        raise MumbleException(f"Could not retrieve signing secret: HTTP {status}")
+        raise MumbleException(f"Could not retrieve signing note: HTTP {status}")
     data_obj = require_json_object(data, "signing secret response")
-    assert_equals(data_obj.get("secret"), task.flag, "Signing secret content was incorrect")
+    assert_equals(data_obj.get("secret"), task.flag, "Signing note content was incorrect")
 
     logger.debug("Checking public signing metadata")
     status, public_data = await client.public_signing_authorities_by_username(username)
@@ -983,8 +981,8 @@ async def getflag_signing_authority(
     if not matching:
         raise MumbleException("Signing authority was missing from public metadata")
     if task.flag in json.dumps(matching[0], ensure_ascii=False):
-        raise MumbleException("Signing secret appeared in public metadata")
-    assert_equals(matching[0].get("secretBlob"), secret_blob, "Public signing secret blob was incorrect")
+        raise MumbleException("Private signing note appeared in public metadata")
+    assert_equals(matching[0].get("secretBlob"), secret_blob, "Public signing metadata was incorrect")
 
     logger.debug("Creating and validating normal server-side signature ceremony")
     status, ceremony_data = await client.create_signature_ceremony(
@@ -1102,7 +1100,7 @@ async def getnoise_contract(
         if not isinstance(contract, dict):
             continue
         if "reference" in contract:
-            raise MumbleException("Public noise metadata exposed a direct contract reference")
+            raise MumbleException("Public noise metadata contained an unexpected record field")
         public_checksums.append(public_contract_checksum(contract))
     assert_in(checksum, public_checksums, "Noise contract checksum was not visible in public metadata")
 
@@ -1225,7 +1223,7 @@ async def exploit_checksum_idor(
 
     target_usernames = extract_usernames_from_hints(task)
     if not target_usernames:
-        raise MumbleException("exploit did not receive a target username")
+        raise MumbleException("Checker task did not contain target metadata")
 
     logger.debug("Resolving %d target usernames via public contract metadata", len(target_usernames))
     for target_username in target_usernames:
@@ -1287,7 +1285,7 @@ async def exploit_annex_notary(
 
     target_usernames = extract_usernames_from_hints(task)
     if not target_usernames:
-        raise MumbleException("exploit did not receive a target username")
+        raise MumbleException("Checker task did not contain target metadata")
 
     logger.debug("Resolving %d target usernames via public archive metadata", len(target_usernames))
     for target_username in target_usernames:
@@ -1362,7 +1360,7 @@ async def exploit_faulty_curve_signing(
 
     target_usernames = extract_usernames_from_hints(task)
     if not target_usernames:
-        raise MumbleException("exploit did not receive a target username")
+        raise MumbleException("Checker task did not contain target metadata")
 
     logger.debug("Resolving %d target usernames via public signing metadata", len(target_usernames))
     for target_username in target_usernames:
