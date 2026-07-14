@@ -25,6 +25,14 @@ Checker vuln `1` flags are stored as private sealed records, not as normal contr
 - Ordinary victim PDFs do not automatically embed the sealed record.
 - Owners can retrieve their own sealed record through `GET /api/contracts/{reference}/notary/sealed`.
 
+## Vulnerability 2: Faulty Curve Signing Flagstore
+
+Checker vuln `2` flags are stored as private signing notes on public signing authorities. A signing authority has a public `SIG-...` identifier, a named curve profile, a default public key, and a public encrypted signing-note blob. Owners can retrieve the note through `GET /api/signing/authorities/{authorityId}/secret`.
+
+Signature ceremonies run on the server. A requester submits a message and may provide a custom elliptic-curve base point. The vulnerable service accepts parseable field coordinates without checking that the supplied point lies on the selected curve. It then multiplies the signing authority's private scalar by that point and returns the resulting signature point as part of the ceremony receipt.
+
+The intended fix is to reject custom base points that are not on the selected curve before signing.
+
 Runtime storage environment:
 
 - `SIGNMEMAYBE_DB_PATH`, default `/data/signmemaybe.sqlite3`
@@ -126,14 +134,27 @@ http://TARGET:1984/api/links/leave?to=<encoded-internal-url>
 10. The existing custom PDF generator embeds those bytes as a PDF attachment in the attacker’s own generated PDF.
 11. The attacker downloads their own latest PDF and extracts or raw-searches the uncompressed embedded file bytes.
 
+## Vuln 2 Exploitation Path
+
+1. The checker creates a victim signing authority and stores the flag as its private signing note.
+2. Public signing metadata exposes the authority id, curve name, public key, and encrypted signing-note blob, but not the plaintext note.
+3. The attacker registers or logs in with their own account.
+4. The attacker fetches `GET /api/users/{victimUsername}/signing-authorities` and selects a `SIG-...` authority.
+5. The attacker starts several server-side ceremonies using off-curve base points of known small order.
+6. For each returned signature point, the attacker brute-forces the signing scalar modulo that point's order.
+7. The attacker combines the residues with CRT until the product covers the service's signing scalar range.
+8. The recovered scalar decrypts the public signing-note blob, revealing the vuln `2` flag.
+
 ## Checker Coverage
 
 - **vuln `0` `putflag/getflag`**: Stores flags in ordinary contract content, creates three decoy contracts, verifies latest JSON/PDF, and checks that public metadata exposes title/checksum pairs but not references.
 - **vuln `1` `putflag/getflag`**: Stores flags in `notarySecret`, records the public stamp, verifies owner-only sealed retrieval, and checks that latest JSON/PDF do not contain the sealed record.
+- **vuln `2` `putflag/getflag`**: Stores flags as private signing notes, records the public signing authority id, verifies owner-only note retrieval, public signing metadata, normal server-side signing, and server-side receipt validation.
 - **`putnoise/getnoise`**: Stores ordinary title/content contracts and verifies standard account, listing, public title/checksum metadata, latest JSON, and PDF workflows.
 - **`havoc`**: Runs stateless health and rejection checks.
 - **vuln `0` `exploit`**: Uses public username/title/checksum metadata to derive candidate contract references and recover ordinary contract content through the IDOR.
 - **vuln `1` `exploit`**: Uses public metadata, the compatibility redirect, certified annex fetching, and PDF embedded files to recover the sealed record.
+- **vuln `2` `exploit`**: Uses public signing metadata, faulty curve base point injection, small-order residues, CRT, and signing-note blob decryption to recover the private signing note.
 
 ## Runtime Cleanup
 
