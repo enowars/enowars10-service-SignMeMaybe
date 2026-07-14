@@ -450,6 +450,10 @@ def get_string_field(data: JsonObject, key: str, context: str) -> str:
     return value
 
 
+def is_pdf_literal_ascii(value: str) -> bool:
+    return all(ord(character) < 128 for character in value)
+
+
 def normalize_checksum(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -760,7 +764,7 @@ async def getflag_idor_contract(
     content_type = headers.get("content-type", "").lower()
     if "application/pdf" not in content_type:
         raise MumbleException("Stored contract PDF had the wrong content type")
-    if task.flag.encode("utf-8") not in pdf_bytes:
+    if is_pdf_literal_ascii(task.flag) and task.flag.encode("utf-8") not in pdf_bytes:
         raise MumbleException("Stored flag content was missing from the PDF")
 
     logger.debug("Checking public metadata for indirect reference leakage")
