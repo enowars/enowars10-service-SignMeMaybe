@@ -1,8 +1,19 @@
 (function () {
     const tokenKey = "signmemaybe.sessionToken";
     const userKey = "signmemaybe.username";
+    const viewKey = "signmemaybe.activeView";
+    const viewLabels = {
+        access: "Access Terminal",
+        intake: "Record Intake",
+        archive: "Archive Cabinet",
+        public: "Public Ledger",
+        signing: "Signing Desk"
+    };
 
     const elements = {
+        viewTabs: Array.from(document.querySelectorAll("[data-view]")),
+        viewPanels: Array.from(document.querySelectorAll("[data-view-panel]")),
+        activeViewLabel: document.getElementById("active-view-label"),
         authForm: document.getElementById("auth-form"),
         username: document.getElementById("username"),
         password: document.getElementById("password"),
@@ -38,6 +49,38 @@
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
     };
+
+    function setActiveView(viewName) {
+        const knownView = elements.viewPanels.some(panel => panel.dataset.viewPanel === viewName);
+        const activeView = knownView ? viewName : "access";
+
+        for (const tab of elements.viewTabs) {
+            const isActive = tab.dataset.view === activeView;
+            tab.classList.toggle("is-active", isActive);
+            tab.setAttribute("aria-selected", isActive ? "true" : "false");
+        }
+
+        for (const panel of elements.viewPanels) {
+            const isActive = panel.dataset.viewPanel === activeView;
+            panel.classList.toggle("is-active", isActive);
+            panel.hidden = !isActive;
+        }
+
+        if (elements.activeViewLabel) {
+            elements.activeViewLabel.textContent = viewLabels[activeView] || activeView;
+        }
+
+        localStorage.setItem(viewKey, activeView);
+    }
+
+    function initializeNavigation() {
+        for (const tab of elements.viewTabs) {
+            tab.addEventListener("click", () => setActiveView(tab.dataset.view));
+        }
+
+        const savedView = localStorage.getItem(viewKey) || "access";
+        setActiveView(savedView);
+    }
 
     function getToken() {
         return localStorage.getItem(tokenKey);
@@ -387,6 +430,7 @@
         showMessage("Contract sealed into the archive.", false);
         await loadContracts();
         await loadContract(created.reference);
+        setActiveView("archive");
     }
 
     async function lookupPublicContracts(event) {
@@ -500,6 +544,7 @@
         }
     });
 
+    initializeNavigation();
     renderSession();
     loadSigningCurves().catch(error => showMessage(error.message, true));
     if (getToken()) {
