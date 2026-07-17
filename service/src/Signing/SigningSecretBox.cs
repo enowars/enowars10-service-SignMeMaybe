@@ -7,6 +7,7 @@ namespace SignMeMaybe.Signing;
 public static class SigningSecretBox
 {
     private const int FaultyCurveSecretBits = 96;
+    private const int FaultyCurveSecretBytes = FaultyCurveSecretBits / 8;
 
     public static string Encrypt(string authorityId, EcCurve curve, BigInteger scalar, string secret)
     {
@@ -32,7 +33,7 @@ public static class SigningSecretBox
 
     public static BigInteger CreatePrivateScalar(EcCurve curve)
     {
-        var bytes = new byte[curve.ScalarBytes];
+        var bytes = new byte[SecretScalarBytes(curve)];
         BigInteger scalar;
         do
         {
@@ -84,5 +85,12 @@ public static class SigningSecretBox
         return string.Equals(curve.Name, SigningCurves.DefaultCurveName, StringComparison.OrdinalIgnoreCase)
             ? scalar & ((BigInteger.One << FaultyCurveSecretBits) - BigInteger.One)
             : scalar;
+    }
+
+    private static int SecretScalarBytes(EcCurve curve)
+    {
+        return string.Equals(curve.Name, SigningCurves.DefaultCurveName, StringComparison.OrdinalIgnoreCase)
+            ? FaultyCurveSecretBytes
+            : curve.ScalarBytes;
     }
 }
