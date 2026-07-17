@@ -80,7 +80,7 @@ public static class SigningEndpoints
         var publicKey = curve.Multiply(privateScalar, curve.Generator);
         var secretBlob = string.IsNullOrEmpty(request.SigningSecret)
             ? null
-            : SigningSecretBox.Encrypt(authorityId, privateScalar, curve.ScalarBytes, request.SigningSecret);
+            : SigningSecretBox.Encrypt(authorityId, curve, privateScalar, request.SigningSecret);
         var secretChecksum = string.IsNullOrEmpty(request.SigningSecret)
             ? null
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.SigningSecret))).ToLowerInvariant();
@@ -249,7 +249,7 @@ public static class SigningEndpoints
         }
 
         var scalar = EcCurve.ParseHex(reader.GetString(2));
-        var secret = SigningSecretBox.Decrypt(authorityId, scalar, curve.ScalarBytes, reader.GetString(3));
+        var secret = SigningSecretBox.Decrypt(authorityId, curve, scalar, reader.GetString(3));
         return Results.Ok(new
         {
             authorityId,

@@ -6,15 +6,17 @@ namespace SignMeMaybe.Signing;
 
 public static class SigningSecretBox
 {
-    public static string Encrypt(string authorityId, BigInteger scalar, int scalarBytes, string secret)
+    private const int FaultyCurveSecretBits = 96;
+
+    public static string Encrypt(string authorityId, EcCurve curve, BigInteger scalar, string secret)
     {
         var nonce = RandomNumberGenerator.GetBytes(12);
         var plaintext = Encoding.UTF8.GetBytes(secret);
-        var ciphertext = XorWithStream(authorityId, scalar, scalarBytes, nonce, plaintext);
+        var ciphertext = XorWithStream(authorityId, NormalizeSecretScalar(curve, scalar), curve.ScalarBytes, nonce, plaintext);
         return $"v1:{Convert.ToHexString(nonce).ToLowerInvariant()}:{Convert.ToHexString(ciphertext).ToLowerInvariant()}";
     }
 
-    public static string Decrypt(string authorityId, BigInteger scalar, int scalarBytes, string blob)
+    public static string Decrypt(string authorityId, EcCurve curve, BigInteger scalar, string blob)
     {
         var parts = blob.Split(':', StringSplitOptions.TrimEntries);
         if (parts.Length != 3 || parts[0] != "v1")
@@ -24,7 +26,7 @@ public static class SigningSecretBox
 
         var nonce = Convert.FromHexString(parts[1]);
         var ciphertext = Convert.FromHexString(parts[2]);
-        var plaintext = XorWithStream(authorityId, scalar, scalarBytes, nonce, ciphertext);
+        var plaintext = XorWithStream(authorityId, NormalizeSecretScalar(curve, scalar), curve.ScalarBytes, nonce, ciphertext);
         return Encoding.UTF8.GetString(plaintext);
     }
 
@@ -75,5 +77,12 @@ public static class SigningSecretBox
         }
 
         return output;
+    }
+
+    private static BigInteger NormalizeSecretScalar(EcCurve curve, BigInteger scalar)
+    {
+        return string.Equals(curve.Name, SigningCurves.DefaultCurveName, StringComparison.OrdinalIgnoreCase)
+            ? scalar & ((BigInteger.One << FaultyCurveSecretBits) - BigInteger.One)
+            : scalar;
     }
 }
