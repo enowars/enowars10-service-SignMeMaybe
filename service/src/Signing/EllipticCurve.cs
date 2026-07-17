@@ -18,6 +18,11 @@ public sealed record EcCurve(
 {
     public int ScalarBytes => Order.ToByteArray(isUnsigned: true, isBigEndian: true).Length;
 
+    private readonly record struct JacobianPoint(BigInteger X, BigInteger Y, BigInteger Z, bool IsInfinity = false)
+    {
+        public static JacobianPoint Infinity { get; } = new(BigInteger.Zero, BigInteger.One, BigInteger.Zero, true);
+    }
+
     public bool IsInField(EcPoint point)
     {
         return !point.IsInfinity
@@ -78,27 +83,108 @@ public sealed record EcCurve(
 
     public EcPoint Multiply(BigInteger scalar, EcPoint point)
     {
-        var result = EcPoint.Infinity;
-        var addend = point;
-
-        while (scalar > BigInteger.Zero)
+        if (scalar <= BigInteger.Zero || point.IsInfinity)
         {
-            if (!scalar.IsEven)
-            {
-                result = Add(result, addend);
-            }
-
-            addend = Add(addend, addend);
-            scalar >>= 1;
+            return EcPoint.Infinity;
         }
 
-        return result;
+        var result = JacobianPoint.Infinity;
+        var scalarBytes = scalar.ToByteArray(isUnsigned: true, isBigEndian: true);
+
+        foreach (var scalarByte in scalarBytes)
+        {
+            for (var bit = 7; bit >= 0; bit--)
+            {
+                result = DoubleJacobian(result);
+                if (((scalarByte >> bit) & 1) != 0)
+                {
+                    result = AddMixed(result, point);
+                }
+            }
+        }
+
+        return ToAffine(result);
     }
 
     public BigInteger Mod(BigInteger value)
     {
         var result = value % P;
         return result.Sign < 0 ? result + P : result;
+    }
+
+    private JacobianPoint FromAffine(EcPoint point)
+    {
+        return point.IsInfinity
+            ? JacobianPoint.Infinity
+            : new JacobianPoint(Mod(point.X), Mod(point.Y), BigInteger.One);
+    }
+
+    private EcPoint ToAffine(JacobianPoint point)
+    {
+        if (point.IsInfinity || point.Z.IsZero)
+        {
+            return EcPoint.Infinity;
+        }
+
+        var zInverse = Inverse(point.Z);
+        var zInverseSquared = Mod(zInverse * zInverse);
+        var x = Mod(point.X * zInverseSquared);
+        var y = Mod(point.Y * zInverseSquared * zInverse);
+        return new EcPoint(x, y);
+    }
+
+    private JacobianPoint DoubleJacobian(JacobianPoint point)
+    {
+        if (point.IsInfinity || point.Y.IsZero)
+        {
+            return JacobianPoint.Infinity;
+        }
+
+        var xx = Mod(point.X * point.X);
+        var yy = Mod(point.Y * point.Y);
+        var yyyy = Mod(yy * yy);
+        var zz = Mod(point.Z * point.Z);
+        var s = Mod(2 * (Mod((point.X + yy) * (point.X + yy)) - xx - yyyy));
+        var m = Mod(3 * xx + A * Mod(zz * zz));
+        var t = Mod(m * m - 2 * s);
+        var x = t;
+        var y = Mod(m * (s - t) - 8 * yyyy);
+        var z = Mod((point.Y + point.Z) * (point.Y + point.Z) - yy - zz);
+        return new JacobianPoint(x, y, z);
+    }
+
+    private JacobianPoint AddMixed(JacobianPoint left, EcPoint right)
+    {
+        if (left.IsInfinity)
+        {
+            return FromAffine(right);
+        }
+
+        if (right.IsInfinity)
+        {
+            return left;
+        }
+
+        var z1z1 = Mod(left.Z * left.Z);
+        var u2 = Mod(right.X * z1z1);
+        var s2 = Mod(right.Y * left.Z * z1z1);
+        var h = Mod(u2 - left.X);
+        var r = Mod(2 * (s2 - left.Y));
+
+        if (h.IsZero)
+        {
+            return r.IsZero ? DoubleJacobian(left) : JacobianPoint.Infinity;
+        }
+
+        var hh = Mod(h * h);
+        var i = Mod(4 * hh);
+        var j = Mod(h * i);
+        var v = Mod(left.X * i);
+        var x = Mod(r * r - j - 2 * v);
+        var y = Mod(r * (v - x) - 2 * left.Y * j);
+        var z = Mod((left.Z + h) * (left.Z + h) - z1z1 - hh);
+
+        return new JacobianPoint(x, y, z);
     }
 
     private BigInteger Inverse(BigInteger value)
