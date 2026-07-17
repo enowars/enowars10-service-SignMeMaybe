@@ -30,14 +30,16 @@ jobs:
         pip install --upgrade enochecker-test
     - name: start service
       run: |
+        PROJECT="${COMPOSE_PROJECT_NAME:-signmemaybe-${GITHUB_RUN_ID:-local}}"
         cd service
-        docker compose build --no-cache
-        docker compose up --force-recreate -d
+        docker compose -p "${PROJECT}-service" build --no-cache
+        docker compose -p "${PROJECT}-service" up --force-recreate -d
     - name: start checker
       run: |
+        PROJECT="${COMPOSE_PROJECT_NAME:-signmemaybe-${GITHUB_RUN_ID:-local}}"
         cd checker
-        docker compose build --no-cache
-        docker compose up --force-recreate -d
+        docker compose -p "${PROJECT}-checker" build --no-cache
+        docker compose -p "${PROJECT}-checker" up --force-recreate -d
     - name: obtain Docker host IP
       run: |
         echo "ENOCHECKER_SERVICE_ADDRESS=$(ip -4 address show dev eth0 | grep inet | awk '{ print $2 }' | sed 's|/.*$||')" >> $GITHUB_ENV
@@ -63,6 +65,6 @@ jobs:
     - name: Kill docker containers
       if: failure() || success()
       run: |
-        (cd service && docker compose kill)
-        (cd checker && docker compose kill)
-
+        PROJECT="${COMPOSE_PROJECT_NAME:-signmemaybe-${GITHUB_RUN_ID:-local}}"
+        (cd service && docker compose -p "${PROJECT}-service" down --volumes --remove-orphans)
+        (cd checker && docker compose -p "${PROJECT}-checker" down --volumes --remove-orphans)
