@@ -6,15 +6,15 @@ namespace SignMeMaybe.Signing;
 
 public static class SigningSecretBox
 {
-    public static string Encrypt(string authorityId, BigInteger scalar, string secret)
+    public static string Encrypt(string authorityId, BigInteger scalar, int scalarBytes, string secret)
     {
         var nonce = RandomNumberGenerator.GetBytes(12);
         var plaintext = Encoding.UTF8.GetBytes(secret);
-        var ciphertext = XorWithStream(authorityId, scalar, nonce, plaintext);
+        var ciphertext = XorWithStream(authorityId, scalar, scalarBytes, nonce, plaintext);
         return $"v1:{Convert.ToHexString(nonce).ToLowerInvariant()}:{Convert.ToHexString(ciphertext).ToLowerInvariant()}";
     }
 
-    public static string Decrypt(string authorityId, BigInteger scalar, string blob)
+    public static string Decrypt(string authorityId, BigInteger scalar, int scalarBytes, string blob)
     {
         var parts = blob.Split(':', StringSplitOptions.TrimEntries);
         if (parts.Length != 3 || parts[0] != "v1")
@@ -24,20 +24,20 @@ public static class SigningSecretBox
 
         var nonce = Convert.FromHexString(parts[1]);
         var ciphertext = Convert.FromHexString(parts[2]);
-        var plaintext = XorWithStream(authorityId, scalar, nonce, ciphertext);
+        var plaintext = XorWithStream(authorityId, scalar, scalarBytes, nonce, ciphertext);
         return Encoding.UTF8.GetString(plaintext);
     }
 
-    public static BigInteger CreatePrivateScalar()
+    public static BigInteger CreatePrivateScalar(EcCurve curve)
     {
-        Span<byte> bytes = stackalloc byte[SigningCurves.PrivateScalarBytes];
+        var bytes = new byte[curve.ScalarBytes];
         BigInteger scalar;
         do
         {
             RandomNumberGenerator.Fill(bytes);
             scalar = new BigInteger(bytes, isUnsigned: true, isBigEndian: true);
         }
-        while (scalar <= BigInteger.Zero || scalar >= SigningCurves.PrivateScalarLimit);
+        while (scalar <= BigInteger.Zero || scalar >= curve.Order);
 
         return scalar;
     }
@@ -50,12 +50,12 @@ public static class SigningSecretBox
             .Replace('/', '_');
     }
 
-    private static byte[] XorWithStream(string authorityId, BigInteger scalar, byte[] nonce, byte[] input)
+    private static byte[] XorWithStream(string authorityId, BigInteger scalar, int scalarBytes, byte[] nonce, byte[] input)
     {
         var output = new byte[input.Length];
         var offset = 0;
         var counter = 0;
-        var scalarHex = EcCurve.ToFixedHex(scalar, SigningCurves.PrivateScalarBytes);
+        var scalarHex = EcCurve.ToFixedHex(scalar, scalarBytes);
         var nonceHex = Convert.ToHexString(nonce).ToLowerInvariant();
 
         while (offset < input.Length)

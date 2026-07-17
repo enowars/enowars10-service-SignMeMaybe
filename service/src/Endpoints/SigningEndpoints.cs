@@ -76,11 +76,11 @@ public static class SigningEndpoints
         }
 
         var authorityId = CreateUniquePublicId(connection, "SIG-");
-        var privateScalar = SigningSecretBox.CreatePrivateScalar();
+        var privateScalar = SigningSecretBox.CreatePrivateScalar(curve);
         var publicKey = curve.Multiply(privateScalar, curve.Generator);
         var secretBlob = string.IsNullOrEmpty(request.SigningSecret)
             ? null
-            : SigningSecretBox.Encrypt(authorityId, privateScalar, request.SigningSecret);
+            : SigningSecretBox.Encrypt(authorityId, privateScalar, curve.ScalarBytes, request.SigningSecret);
         var secretChecksum = string.IsNullOrEmpty(request.SigningSecret)
             ? null
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.SigningSecret))).ToLowerInvariant();
@@ -98,7 +98,7 @@ public static class SigningEndpoints
         Database.AddParameter(command, "$owner_user_id", user.Id);
         Database.AddParameter(command, "$display_name", displayName);
         Database.AddParameter(command, "$curve_name", curve.Name);
-        Database.AddParameter(command, "$private_scalar", EcCurve.ToFixedHex(privateScalar, SigningCurves.PrivateScalarBytes));
+        Database.AddParameter(command, "$private_scalar", EcCurve.ToFixedHex(privateScalar, curve.ScalarBytes));
         Database.AddParameter(command, "$public_key_x", EcCurve.ToHex(publicKey.X));
         Database.AddParameter(command, "$public_key_y", EcCurve.ToHex(publicKey.Y));
         Database.AddParameter(command, "$secret_blob", secretBlob);
@@ -220,7 +220,7 @@ public static class SigningEndpoints
 
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT owner_user_id, private_scalar, secret_blob
+            SELECT owner_user_id, curve_name, private_scalar, secret_blob
             FROM signing_authorities
             WHERE public_id = $public_id
             LIMIT 1;
@@ -238,13 +238,18 @@ public static class SigningEndpoints
             return Results.StatusCode(StatusCodes.Status403Forbidden);
         }
 
-        if (reader.IsDBNull(2))
+        if (reader.IsDBNull(3))
         {
             return Results.NotFound(new { error = "signing secret not found" });
         }
 
-        var scalar = EcCurve.ParseHex(reader.GetString(1));
-        var secret = SigningSecretBox.Decrypt(authorityId, scalar, reader.GetString(2));
+        if (!SigningCurves.TryGet(reader.GetString(1), out var curve))
+        {
+            return Results.BadRequest(new { error = "signing authority uses an unknown curve" });
+        }
+
+        var scalar = EcCurve.ParseHex(reader.GetString(2));
+        var secret = SigningSecretBox.Decrypt(authorityId, scalar, curve.ScalarBytes, reader.GetString(3));
         return Results.Ok(new
         {
             authorityId,
