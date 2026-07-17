@@ -4,7 +4,7 @@ public sealed record ServiceOptions(
     string DbPath,
     string PdfRoot,
     string ExportRoot,
-    string NotaryVaultRoot,
+    string PacketRoot,
     long MaxUploadBytes,
     int CleanupRetentionSeconds)
 {
@@ -19,8 +19,8 @@ public sealed record ServiceOptions(
         var exportRoot = Environment.GetEnvironmentVariable("SIGNMEMAYBE_EXPORT_ROOT")
             ?? "/data/exports";
 
-        var notaryVaultRoot = Environment.GetEnvironmentVariable("SIGNMEMAYBE_NOTARY_VAULT_ROOT")
-            ?? "/data/notary-vault";
+        var packetRoot = Environment.GetEnvironmentVariable("SIGNMEMAYBE_PACKET_ROOT")
+            ?? "/data/packets";
 
         var maxUploadBytesRaw = Environment.GetEnvironmentVariable("SIGNMEMAYBE_MAX_UPLOAD_BYTES")
             ?? "10485760";
@@ -33,7 +33,7 @@ public sealed record ServiceOptions(
             "SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS",
             720);
 
-        return new ServiceOptions(dbPath, pdfRoot, exportRoot, notaryVaultRoot, maxUploadBytes, cleanupRetentionSeconds);
+        return new ServiceOptions(dbPath, pdfRoot, exportRoot, packetRoot, maxUploadBytes, cleanupRetentionSeconds);
     }
 
     public void EnsureStorageExists()
@@ -41,7 +41,7 @@ public sealed record ServiceOptions(
         Directory.CreateDirectory(Path.GetDirectoryName(DbPath) ?? "/data");
         Directory.CreateDirectory(PdfRoot);
         Directory.CreateDirectory(ExportRoot);
-        Directory.CreateDirectory(NotaryVaultRoot);
+        Directory.CreateDirectory(PacketRoot);
     }
 
     private static int LoadPositiveInt(string name, int fallback)

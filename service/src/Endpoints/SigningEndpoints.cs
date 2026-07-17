@@ -81,7 +81,7 @@ public static class SigningEndpoints
         var secretBlob = string.IsNullOrEmpty(request.SigningSecret)
             ? null
             : SigningSecretBox.Encrypt(authorityId, curve, privateScalar, request.SigningSecret);
-        var secretChecksum = string.IsNullOrEmpty(request.SigningSecret)
+        var profileDigest = string.IsNullOrEmpty(request.SigningSecret)
             ? null
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.SigningSecret))).ToLowerInvariant();
 
@@ -102,7 +102,7 @@ public static class SigningEndpoints
         Database.AddParameter(command, "$public_key_x", EcCurve.ToHex(publicKey.X));
         Database.AddParameter(command, "$public_key_y", EcCurve.ToHex(publicKey.Y));
         Database.AddParameter(command, "$secret_blob", secretBlob);
-        Database.AddParameter(command, "$secret_checksum", secretChecksum);
+        Database.AddParameter(command, "$secret_checksum", profileDigest);
         command.ExecuteNonQuery();
 
         return Results.Created($"/api/signing/authorities/{Uri.EscapeDataString(authorityId)}", new
@@ -112,8 +112,7 @@ public static class SigningEndpoints
             displayName,
             curveName = curve.Name,
             publicKey = SigningCurves.ToPublicPoint(publicKey),
-            secretBlob,
-            secretChecksum
+            secretBlob
         });
     }
 
@@ -128,7 +127,7 @@ public static class SigningEndpoints
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT public_id, display_name, curve_name, public_key_x, public_key_y,
-                   secret_blob, secret_checksum, created_at
+                   secret_blob, created_at
             FROM signing_authorities
             WHERE owner_user_id = $owner_user_id
             ORDER BY id ASC;
@@ -155,7 +154,7 @@ public static class SigningEndpoints
         command.CommandText = """
             SELECT u.username, sa.public_id, sa.display_name, sa.curve_name,
                    sa.public_key_x, sa.public_key_y, sa.secret_blob,
-                   sa.secret_checksum, sa.created_at
+                   sa.created_at
             FROM users u
             JOIN signing_authorities sa ON sa.owner_user_id = u.id
             WHERE u.username = $username
@@ -177,8 +176,7 @@ public static class SigningEndpoints
                     reader.GetString(4),
                     reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.GetString(8)));
+                    reader.GetString(7)));
             }
         }
 
@@ -449,8 +447,7 @@ public static class SigningEndpoints
                 reader.GetString(3),
                 reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.GetString(7)));
+                reader.GetString(6)));
         }
 
         return authorities;
@@ -463,7 +460,6 @@ public static class SigningEndpoints
         string publicKeyX,
         string publicKeyY,
         string? secretBlob,
-        string? secretChecksum,
         string createdAt)
     {
         return new
@@ -473,7 +469,6 @@ public static class SigningEndpoints
             curveName,
             publicKey = new { x = publicKeyX, y = publicKeyY },
             secretBlob,
-            secretChecksum,
             createdAt
         };
     }

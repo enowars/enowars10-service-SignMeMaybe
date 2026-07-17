@@ -107,7 +107,7 @@
                         <label>
                             Content
                             <textarea id="contract-content" name="content" rows="8" required></textarea>
-                            <span class="field-note">Certified PDFs may include external evidence attachments declared in contract markup.</span>
+                            <span class="field-note">PDF export supports linked annex material declared in contract markup.</span>
                         </label>
                         <button type="submit">Seal record</button>
                     </form>
@@ -238,20 +238,6 @@
                             Message
                             <textarea id="ceremony-message" name="ceremonyMessage" rows="4" required></textarea>
                         </label>
-                        <label class="checkbox-row">
-                            <input id="ceremony-custom-base" name="ceremonyCustomBase" type="checkbox" />
-                            Custom base point
-                        </label>
-                        <div id="ceremony-base-fields" class="inline-fields hidden">
-                            <label>
-                                Base X
-                                <input id="ceremony-base-x" name="ceremonyBaseX" autocomplete="off" />
-                            </label>
-                            <label>
-                                Base Y
-                                <input id="ceremony-base-y" name="ceremonyBaseY" autocomplete="off" />
-                            </label>
-                        </div>
                         <button type="submit">Sign on server</button>
                         <article id="ceremony-result" class="result-box">
                             <p class="muted">Start a ceremony to inspect and validate the receipt.</p>

@@ -4,7 +4,7 @@ public sealed record RegisterRequest(string Username, string Password);
 
 public sealed record LoginRequest(string Username, string Password);
 
-public sealed record ContractCreateRequest(string Title, string Content, string? NotarySecret = null);
+public sealed record ContractCreateRequest(string Title, string Content, string? ArchivePacket = null);
 
 public sealed record SigningAuthorityCreateRequest(
     string DisplayName,

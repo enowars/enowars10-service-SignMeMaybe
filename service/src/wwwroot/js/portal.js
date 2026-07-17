@@ -41,10 +41,6 @@
         signatureCeremonyForm: document.getElementById("signature-ceremony-form"),
         ceremonyAuthorityId: document.getElementById("ceremony-authority-id"),
         ceremonyMessage: document.getElementById("ceremony-message"),
-        ceremonyCustomBase: document.getElementById("ceremony-custom-base"),
-        ceremonyBaseFields: document.getElementById("ceremony-base-fields"),
-        ceremonyBaseX: document.getElementById("ceremony-base-x"),
-        ceremonyBaseY: document.getElementById("ceremony-base-y"),
         ceremonyResult: document.getElementById("ceremony-result"),
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
@@ -181,7 +177,7 @@
         const data = await api("/api/contracts");
         const contracts = Array.isArray(data.contracts) ? data.contracts : [];
         if (contracts.length === 0) {
-            elements.contractList.innerHTML = '<p class="muted">No contracts sealed yet.</p>';
+            elements.contractList.innerHTML = '<p class="muted">No contracts filed yet.</p>';
             return;
         }
 
@@ -225,10 +221,7 @@
     function renderSigningAuthorityButton(authority) {
         const authorityId = authority.authorityId || "";
         const secretBlob = authority.secretBlob
-            ? `<span>Secret blob ${escapeHtml(authority.secretBlob)}</span>`
-            : "";
-        const checksum = authority.secretChecksum
-            ? `<span>Secret checksum ${escapeHtml(authority.secretChecksum)}</span>`
+            ? `<span>Receipt blob ${escapeHtml(authority.secretBlob)}</span>`
             : "";
         const item = document.createElement("button");
         item.type = "button";
@@ -238,7 +231,6 @@
             <span class="meta-row">
                 <span>Authority ${escapeHtml(authorityId)}</span>
                 <span>Curve ${escapeHtml(authority.curveName || "")}</span>
-                ${checksum}
                 ${secretBlob}
             </span>`;
         item.addEventListener("click", () => {
@@ -297,13 +289,6 @@
             curveName: elements.signingCurve.value
         };
 
-        if (elements.ceremonyCustomBase.checked) {
-            body.basePoint = {
-                x: elements.ceremonyBaseX.value.trim(),
-                y: elements.ceremonyBaseY.value.trim()
-            };
-        }
-
         const ceremony = await api(`/api/signing/authorities/${encodeURIComponent(authorityId)}/ceremonies`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -347,8 +332,8 @@
     function renderContractButton(contract) {
         const reference = contract.reference || "";
         const latestVersion = contract.latestVersion || {};
-        const notaryStamp = contract.notaryStamp
-            ? `<span>Notary stamp ${escapeHtml(contract.notaryStamp)}</span>`
+        const archiveTicket = contract.archiveTicket
+            ? `<span>Archive ticket ${escapeHtml(contract.archiveTicket)}</span>`
             : "";
         const referenceLabel = reference
             ? `<span>Ref ${escapeHtml(reference)}</span>`
@@ -368,7 +353,7 @@
                 <span>Version ${latestVersion.versionNumber}</span>
                 <span>${escapeHtml(latestVersion.approvalState)}</span>
                 ${checksumLabel}
-                ${notaryStamp}
+                ${archiveTicket}
             </span>`;
         if (reference) {
             item.addEventListener("click", () => loadContract(reference));
@@ -427,7 +412,7 @@
         });
 
         elements.contractForm.reset();
-        showMessage("Contract sealed into the archive.", false);
+        showMessage("Contract filed into the archive.", false);
         await loadContracts();
         await loadContract(created.reference);
         setActiveView("archive");
@@ -522,10 +507,6 @@
             event.preventDefault();
             showMessage(error.message, true);
         }
-    });
-
-    elements.ceremonyCustomBase.addEventListener("change", function () {
-        elements.ceremonyBaseFields.classList.toggle("hidden", !elements.ceremonyCustomBase.checked);
     });
 
     elements.refreshButton.addEventListener("click", async function () {

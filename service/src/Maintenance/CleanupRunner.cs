@@ -78,7 +78,7 @@ public static class CleanupRunner
         {
             deletedFiles += DeleteOldFiles(options.PdfRoot, cutoffUtc, options);
             deletedFiles += DeleteOldFiles(options.ExportRoot, cutoffUtc, options);
-            deletedFiles += DeleteOldFiles(options.NotaryVaultRoot, cutoffUtc, options);
+            deletedFiles += DeleteOldFiles(options.PacketRoot, cutoffUtc, options);
         }
 
         return new CleanupResult(
@@ -143,8 +143,8 @@ public static class CleanupRunner
                 LIMIT $limit
             )
             UNION
-            SELECT secret_path
-            FROM notary_secrets
+            SELECT file_path
+            FROM contract_packets
             WHERE contract_id IN (
                 SELECT id
                 FROM contracts
@@ -245,7 +245,7 @@ public static class CleanupRunner
                   'sessions',
                   'contracts',
                   'contract_versions',
-                  'notary_secrets',
+                  'contract_packets',
                   'signing_authorities',
                   'signature_ceremonies'
               )
@@ -313,7 +313,7 @@ public static class CleanupRunner
     {
         return IsUnderRoot(filePath, options.PdfRoot)
             || IsUnderRoot(filePath, options.ExportRoot)
-            || IsUnderRoot(filePath, options.NotaryVaultRoot);
+            || IsUnderRoot(filePath, options.PacketRoot);
     }
 
     private static bool IsDatabaseFile(string filePath, ServiceOptions options)

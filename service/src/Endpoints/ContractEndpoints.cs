@@ -11,8 +11,8 @@ namespace SignMeMaybe.Endpoints;
 
 public static class ContractEndpoints
 {
-    private const int MaxNotarySecretBytes = 4096;
-    private const string NotaryDisplayName = "sealed-record.txt";
+    private const int MaxArchivePacketBytes = 4096;
+    private const string ArchivePacketDisplayName = "archive-packet.txt";
 
     public static void MapContractEndpoints(this WebApplication app, ServiceOptions options)
     {
@@ -25,8 +25,8 @@ public static class ContractEndpoints
         app.MapGet("/api/users/{username}/contracts", (string username) =>
             ListPublicContractsByUsername(username, options));
 
-        app.MapGet("/api/contracts/{reference}/notary/sealed", (HttpRequest httpRequest, string reference) =>
-            GetOwnerSealedRecord(httpRequest, reference, options));
+        app.MapGet("/api/contracts/{reference}/archive/packet", (HttpRequest httpRequest, string reference) =>
+            GetOwnerArchivePacket(httpRequest, reference, options));
 
         app.MapGet("/api/contracts/{reference}/versions/latest", (HttpRequest httpRequest, string reference) =>
             GetLatestContractVersion(httpRequest, reference, options));
@@ -70,24 +70,27 @@ public static class ContractEndpoints
 
         var checksum = Hashing.Sha256Hex(contentBytes);
 
-        byte[]? notarySecretBytes = null;
-        if (!string.IsNullOrEmpty(request.NotarySecret))
+        byte[]? archivePacketBytes = null;
+        if (!string.IsNullOrEmpty(request.ArchivePacket))
         {
-            notarySecretBytes = Encoding.UTF8.GetBytes(request.NotarySecret);
-            if (notarySecretBytes.Length > MaxNotarySecretBytes)
+            archivePacketBytes = Encoding.UTF8.GetBytes(request.ArchivePacket);
+            if (archivePacketBytes.Length > MaxArchivePacketBytes)
             {
-                return Results.BadRequest(new { error = $"sealed record exceeds max size of {MaxNotarySecretBytes} bytes" });
+                return Results.BadRequest(new { error = $"archive packet exceeds max size of {MaxArchivePacketBytes} bytes" });
             }
         }
 
         var directives = AnnexDirectiveParser.Parse(request.Content);
-        var attachments = await RemoteAnnexFetcher.FetchAsync(directives, httpRequest.HttpContext.RequestAborted);
+        var attachments = await RemoteAnnexFetcher.FetchAsync(
+            directives,
+            httpRequest.Host.Value ?? "",
+            httpRequest.HttpContext.RequestAborted);
         var pdfBytes = PdfDocumentGenerator.CreateContractPdf(title, request.Content, attachments);
-        var notarySecretChecksum = notarySecretBytes is { Length: > 0 }
-            ? Hashing.Sha256Hex(notarySecretBytes)
+        var archivePacketChecksum = archivePacketBytes is { Length: > 0 }
+            ? Hashing.Sha256Hex(archivePacketBytes)
             : null;
 
-        string? notaryFilePath = null;
+        string? archivePacketFilePath = null;
         string? storedFilePath = null;
         var committed = false;
 
@@ -96,7 +99,7 @@ public static class ContractEndpoints
             using var connection = Database.OpenConnection(options.DbPath);
             using var transaction = connection.BeginTransaction();
 
-            var reference = CreateMetadataDerivedContractReference(
+            var reference = CreateArchiveReference(
                 connection,
                 transaction,
                 user.Username,
@@ -115,30 +118,30 @@ public static class ContractEndpoints
             Database.AddParameter(insertContract, "$title", title);
 
             var contractId = Convert.ToInt64(insertContract.ExecuteScalar());
-            string? publicStamp = null;
+            string? archiveTicket = null;
 
-            if (notarySecretBytes is { Length: > 0 })
+            if (archivePacketBytes is { Length: > 0 })
             {
-                Directory.CreateDirectory(options.NotaryVaultRoot);
-                publicStamp = CreateUniquePublicStamp(connection, transaction);
-                notaryFilePath = CreateNotarySecretPath(options.NotaryVaultRoot);
-                File.WriteAllBytes(notaryFilePath, notarySecretBytes);
+                Directory.CreateDirectory(options.PacketRoot);
+                archiveTicket = CreateUniqueArchiveTicket(connection, transaction);
+                archivePacketFilePath = CreateArchivePacketPath(options.PacketRoot);
+                File.WriteAllBytes(archivePacketFilePath, archivePacketBytes);
 
-                using var insertNotary = connection.CreateCommand();
-                insertNotary.Transaction = transaction;
-                insertNotary.CommandText = """
-                    INSERT INTO notary_secrets
-                        (owner_user_id, contract_id, public_stamp, secret_path, display_name, checksum)
+                using var insertPacket = connection.CreateCommand();
+                insertPacket.Transaction = transaction;
+                insertPacket.CommandText = """
+                    INSERT INTO contract_packets
+                        (owner_user_id, contract_id, public_ticket, file_path, display_name, checksum)
                     VALUES
-                        ($owner_user_id, $contract_id, $public_stamp, $secret_path, $display_name, $checksum);
+                        ($owner_user_id, $contract_id, $public_ticket, $file_path, $display_name, $checksum);
                     """;
-                Database.AddParameter(insertNotary, "$owner_user_id", user.Id);
-                Database.AddParameter(insertNotary, "$contract_id", contractId);
-                Database.AddParameter(insertNotary, "$public_stamp", publicStamp);
-                Database.AddParameter(insertNotary, "$secret_path", notaryFilePath);
-                Database.AddParameter(insertNotary, "$display_name", NotaryDisplayName);
-                Database.AddParameter(insertNotary, "$checksum", notarySecretChecksum);
-                insertNotary.ExecuteNonQuery();
+                Database.AddParameter(insertPacket, "$owner_user_id", user.Id);
+                Database.AddParameter(insertPacket, "$contract_id", contractId);
+                Database.AddParameter(insertPacket, "$public_ticket", archiveTicket);
+                Database.AddParameter(insertPacket, "$file_path", archivePacketFilePath);
+                Database.AddParameter(insertPacket, "$display_name", ArchivePacketDisplayName);
+                Database.AddParameter(insertPacket, "$checksum", archivePacketChecksum);
+                insertPacket.ExecuteNonQuery();
             }
 
             var storedFileName = $"{reference}-{Guid.NewGuid():N}.pdf";
@@ -172,14 +175,14 @@ public static class ContractEndpoints
                 versionNumber = 1,
                 approvalState = "draft",
                 checksum,
-                notaryStamp = publicStamp
+                archiveTicket
             });
         }
         finally
         {
             if (!committed)
             {
-                TryDeleteFile(notaryFilePath);
+                TryDeleteFile(archivePacketFilePath);
                 TryDeleteFile(storedFilePath);
             }
         }
@@ -204,10 +207,10 @@ public static class ContractEndpoints
                 v.approval_state,
                 v.checksum,
                 v.created_at,
-                ns.public_stamp
+                cp.public_ticket
             FROM contracts c
             JOIN contract_versions v ON v.contract_id = c.id
-            LEFT JOIN notary_secrets ns ON ns.contract_id = c.id
+            LEFT JOIN contract_packets cp ON cp.contract_id = c.id
             WHERE c.owner_user_id = $owner_user_id
               AND v.version_number = (
                   SELECT MAX(version_number)
@@ -235,7 +238,7 @@ public static class ContractEndpoints
                     checksum = reader.GetString(5),
                     createdAt = reader.GetString(6)
                 },
-                notaryStamp = reader.IsDBNull(7) ? null : reader.GetString(7)
+                archiveTicket = reader.IsDBNull(7) ? null : reader.GetString(7)
             });
         }
 
@@ -267,11 +270,11 @@ public static class ContractEndpoints
                 v.approval_state,
                 v.checksum,
                 v.created_at,
-                ns.public_stamp
+                cp.public_ticket
             FROM users u
             JOIN contracts c ON c.owner_user_id = u.id
             JOIN contract_versions v ON v.contract_id = c.id
-            LEFT JOIN notary_secrets ns ON ns.contract_id = c.id
+            LEFT JOIN contract_packets cp ON cp.contract_id = c.id
             WHERE u.username = $username
               AND v.version_number = (
                   SELECT MAX(version_number)
@@ -300,7 +303,7 @@ public static class ContractEndpoints
                     checksum = reader.GetString(6),
                     createdAt = reader.GetString(7)
                 },
-                notaryStamp = reader.IsDBNull(8) ? null : reader.GetString(8)
+                archiveTicket = reader.IsDBNull(8) ? null : reader.GetString(8)
             });
         }
 
@@ -329,7 +332,7 @@ public static class ContractEndpoints
         });
     }
 
-    private static IResult GetOwnerSealedRecord(
+    private static IResult GetOwnerArchivePacket(
         HttpRequest httpRequest,
         string reference,
         ServiceOptions options)
@@ -345,10 +348,10 @@ public static class ContractEndpoints
         command.CommandText = """
             SELECT
                 c.owner_user_id,
-                ns.secret_path,
-                ns.display_name
+                cp.file_path,
+                cp.display_name
             FROM contracts c
-            LEFT JOIN notary_secrets ns ON ns.contract_id = c.id
+            LEFT JOIN contract_packets cp ON cp.contract_id = c.id
             WHERE c.public_reference = $public_reference
             LIMIT 1;
             """;
@@ -367,17 +370,17 @@ public static class ContractEndpoints
 
         if (reader.IsDBNull(1))
         {
-            return Results.NotFound(new { error = "sealed record not found" });
+            return Results.NotFound(new { error = "archive packet not found" });
         }
 
-        var secretPath = reader.GetString(1);
+        var packetPath = reader.GetString(1);
         var displayName = reader.GetString(2);
-        if (!File.Exists(secretPath))
+        if (!File.Exists(packetPath))
         {
-            return Results.NotFound(new { error = "sealed record not found" });
+            return Results.NotFound(new { error = "archive packet not found" });
         }
 
-        return Results.File(secretPath, "text/plain", displayName);
+        return Results.File(packetPath, "text/plain", displayName);
     }
 
     private static IResult GetLatestContractVersion(
@@ -483,7 +486,7 @@ public static class ContractEndpoints
         return Results.File(storedFilePath, "application/pdf", $"{reference}-latest.pdf");
     }
 
-    private static string CreateMetadataDerivedContractReference(
+    private static string CreateArchiveReference(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string username,
@@ -493,8 +496,8 @@ public static class ContractEndpoints
         var normalizedChecksum = checksum.ToLowerInvariant();
         var normalizedTitle = title.Trim();
         var derivationMaterial = Encoding.UTF8.GetBytes($"{username}:{normalizedTitle}:{normalizedChecksum}");
-        var derivedChecksum = Hashing.Sha256Hex(derivationMaterial);
-        var preferredReference = $"CNTR-{derivedChecksum[..24]}";
+        var referenceHash = Hashing.Sha256Hex(derivationMaterial);
+        var preferredReference = $"CNTR-{referenceHash[..24]}";
         if (IsContractReferenceAvailable(connection, transaction, preferredReference))
         {
             return preferredReference;
@@ -537,33 +540,33 @@ public static class ContractEndpoints
         return Results.Redirect(uri.ToString(), permanent: false);
     }
 
-    private static string CreateUniquePublicStamp(
+    private static string CreateUniqueArchiveTicket(
         SqliteConnection connection,
         SqliteTransaction transaction)
     {
         for (var attempt = 0; attempt < 16; attempt++)
         {
-            var publicStamp = CreatePublicStamp();
+            var publicTicket = CreatePublicTicket();
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
                 SELECT 1
-                FROM notary_secrets
-                WHERE public_stamp = $public_stamp
+                FROM contract_packets
+                WHERE public_ticket = $public_ticket
                 LIMIT 1;
                 """;
-            Database.AddParameter(command, "$public_stamp", publicStamp);
+            Database.AddParameter(command, "$public_ticket", publicTicket);
 
             if (command.ExecuteScalar() is null)
             {
-                return publicStamp;
+                return publicTicket;
             }
         }
 
-        throw new InvalidOperationException("Could not generate a unique notary stamp.");
+        throw new InvalidOperationException("Could not generate a unique archive ticket.");
     }
 
-    private static string CreatePublicStamp()
+    private static string CreatePublicTicket()
     {
         return Convert.ToBase64String(RandomNumberGenerator.GetBytes(24))
             .TrimEnd('=')
@@ -571,10 +574,10 @@ public static class ContractEndpoints
             .Replace('/', '_');
     }
 
-    private static string CreateNotarySecretPath(string notaryVaultRoot)
+    private static string CreateArchivePacketPath(string packetRoot)
     {
-        var fileName = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant() + ".sealed";
-        return Path.Combine(notaryVaultRoot, fileName);
+        var fileName = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant() + ".packet";
+        return Path.Combine(packetRoot, fileName);
     }
 
     private static void TryDeleteFile(string? filePath)

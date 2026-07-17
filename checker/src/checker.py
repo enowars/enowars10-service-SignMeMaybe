@@ -90,12 +90,11 @@ HANDLE_PARTS = [
     "ledger",
     "matrix",
     "morrow",
-    "notary",
     "parcel",
     "record",
     "signal",
     "vector",
-    "vault",
+    "minute",
 ]
 
 
@@ -275,14 +274,14 @@ class HttpClient:
         token: str,
         title: str,
         content: str,
-        notary_secret: str | None = None,
+        archive_packet: str | None = None,
     ) -> JsonObject:
         body: JsonObject = {
             "title": title,
             "content": content,
         }
-        if notary_secret is not None:
-            body["notarySecret"] = notary_secret
+        if archive_packet is not None:
+            body["archivePacket"] = archive_packet
 
         status, data = await self.request_json(
             "POST",
@@ -340,10 +339,10 @@ class HttpClient:
             token=token,
         )
 
-    async def sealed_record(self, token: str, reference: str) -> tuple[int, bytes, dict[str, str]]:
+    async def archive_packet(self, token: str, reference: str) -> tuple[int, bytes, dict[str, str]]:
         return await self.request_bytes(
             "GET",
-            f"/api/contracts/{reference}/notary/sealed",
+            f"/api/contracts/{reference}/archive/packet",
             token=token,
         )
 
@@ -561,7 +560,7 @@ def singular_point_to_fp2(point: EcPoint) -> Fp2:
 
     x, y = point
     if x == 1:
-        raise MumbleException("Faulty signing point hit the singular node")
+        raise MumbleException("Alternate signing point hit the singular node")
 
     slope = (y * ec_inverse(x - 1)) % SIGNING_P
     denominator = ec_inverse(slope * slope - SIGNING_ATTACK_SINGULAR_D)
@@ -592,7 +591,7 @@ def discrete_log_power_of_two(base_point: EcPoint, target: EcPoint, order_bits: 
     half_order = fp2_pow2(base, order_bits - 1)
 
     if half_order == identity:
-        raise MumbleException("Faulty signing point did not have the expected order")
+        raise MumbleException("Alternate signing point did not have the expected order")
 
     scalar = 0
     known_value = identity
@@ -847,7 +846,7 @@ async def getflag_idor_contract(
 
 
 @checker.putflag(1)
-async def putflag_notary_contract(
+async def putflag_archive_contract(
     task: PutflagCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -858,30 +857,30 @@ async def putflag_notary_contract(
     username = random_username()
     password = random_password()
     title = "Certified Supplier Agreement " + random_suffix(12)
-    content = "This contract package is sealed by the SignMeMaybe notary service."
+    content = "This contract package includes a private archive packet."
 
-    logger.debug("Registering notary flag owner")
+    logger.debug("Registering archive packet flag owner")
     _user_id, _username, token = await client.register_user(username, password)
 
-    logger.debug("Creating contract package with a sealed record")
-    created = await client.create_contract(token, title, content, notary_secret=task.flag)
+    logger.debug("Creating contract package with a private packet")
+    created = await client.create_contract(token, title, content, archive_packet=task.flag)
     reference = get_string_field(created, "reference", "contract creation response")
-    notary_stamp = get_string_field(created, "notaryStamp", "contract creation response")
+    archive_ticket = get_string_field(created, "archiveTicket", "contract creation response")
 
-    logger.debug("Checking that the new notary contract is present in the owner's list")
+    logger.debug("Checking that the new archive packet contract is present in the owner's list")
     contracts = await client.list_contracts(token)
     listed_references = [contract.get("reference") for contract in contracts]
-    assert_in(reference, listed_references, "Created notary contract was not visible in the owner's list")
+    assert_in(reference, listed_references, "Created archive packet contract was not visible in the owner's list")
 
     await db.set(
-        "notary_contract",
+        "archive_contract",
         {
             "username": username,
             "password": password,
             "title": title,
             "content": content,
             "reference": reference,
-            "notaryStamp": notary_stamp,
+            "archiveTicket": archive_ticket,
         },
     )
 
@@ -889,7 +888,7 @@ async def putflag_notary_contract(
 
 
 @checker.getflag(1)
-async def getflag_notary_contract(
+async def getflag_archive_contract(
     task: GetflagCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -898,7 +897,7 @@ async def getflag_notary_contract(
     log_unexpected_flag_format(task.flag, logger)
 
     try:
-        stored = await db.get("notary_contract")
+        stored = await db.get("archive_contract")
         username = stored["username"]
         password = stored["password"]
         reference = stored["reference"]
@@ -909,36 +908,36 @@ async def getflag_notary_contract(
             "before storing checker state"
         ) from exc
 
-    logger.debug("Logging in as the notary flag owner")
+    logger.debug("Logging in as the archive packet flag owner")
     _user_id, _username, token = await client.login_user(username, password)
 
-    logger.debug("Retrieving own sealed notary record")
-    status, sealed_bytes, _headers = await client.sealed_record(token, reference)
+    logger.debug("Retrieving own private archive packet")
+    status, packet_bytes, _headers = await client.archive_packet(token, reference)
     if status != 200:
         raise MumbleException(f"Could not retrieve private package: HTTP {status}")
-    if sealed_bytes != task.flag.encode("utf-8"):
+    if packet_bytes != task.flag.encode("utf-8"):
         raise MumbleException("Private package content was incorrect")
 
-    logger.debug("Retrieving own latest notary contract version")
+    logger.debug("Retrieving own latest archive packet contract version")
     status, data = await client.latest_contract_version(token, reference)
 
     if status != 200:
-        raise MumbleException(f"Could not retrieve stored notary contract: HTTP {status}")
+        raise MumbleException(f"Could not retrieve stored archive packet contract: HTTP {status}")
 
-    data_obj = require_json_object(data, "latest notary contract response")
-    latest_content = get_string_field(data_obj, "content", "latest notary contract response")
+    data_obj = require_json_object(data, "latest archive packet contract response")
+    latest_content = get_string_field(data_obj, "content", "latest archive packet contract response")
     if latest_content != content:
-        raise MumbleException("Stored public notary contract content was incorrect")
+        raise MumbleException("Stored public archive packet contract content was incorrect")
     if task.flag in json.dumps(data_obj, ensure_ascii=False):
         raise MumbleException("Private package data appeared in public metadata")
 
-    logger.debug("Retrieving own latest notary contract PDF")
+    logger.debug("Retrieving own latest archive packet contract PDF")
     status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
     if status != 200:
-        raise MumbleException(f"Could not retrieve stored notary contract PDF: HTTP {status}")
+        raise MumbleException(f"Could not retrieve stored archive packet contract PDF: HTTP {status}")
     content_type = headers.get("content-type", "").lower()
     if "application/pdf" not in content_type:
-        raise MumbleException("Stored notary contract PDF had the wrong content type")
+        raise MumbleException("Stored archive packet contract PDF had the wrong content type")
     if task.flag.encode("utf-8") in pdf_bytes:
         raise MumbleException("Private package data appeared in the public PDF")
 
@@ -1319,7 +1318,7 @@ async def exploit_checksum_idor(
 
 
 @checker.exploit(1)
-async def exploit_annex_notary(
+async def exploit_annex_archive(
     task: ExploitCheckerTaskMessage,
     searcher: FlagSearcher,
     logger: LoggerAdapter,
@@ -1356,20 +1355,20 @@ async def exploit_annex_notary(
             if not isinstance(contract, dict):
                 continue
 
-            notary_stamp = contract.get("notaryStamp")
-            if not isinstance(notary_stamp, str) or not notary_stamp:
+            archive_ticket = contract.get("archiveTicket")
+            if not isinstance(archive_ticket, str) or not archive_ticket:
                 continue
 
             internal_url = (
-                f"http://127.0.0.1:{SERVICE_PORT}/internal/notary/sealed/"
-                f"{parse.quote(notary_stamp, safe='')}"
+                f"http://127.0.0.1:{SERVICE_PORT}/internal/archive/packets/"
+                f"{parse.quote(archive_ticket, safe='')}"
             )
             redirect_url = (
                 f"{client.base_url}/api/links/leave?to="
                 f"{parse.quote(internal_url, safe='')}"
             )
             annex_content = (
-                '<link rel="attachment" title="sealed-record.txt" '
+                '<link rel="attachment" title="archive-packet.txt" '
                 f'href="{redirect_url}">'
             )
 
@@ -1446,7 +1445,7 @@ async def exploit_faulty_curve_signing(
                 base_point=SIGNING_ATTACK_POINT,
             )
             if status not in (200, 201):
-                logger.debug("Faulty signing point was rejected with HTTP %s", status)
+                logger.debug("Alternate signing point was rejected with HTTP %s", status)
                 continue
 
             ceremony_obj = require_json_object(ceremony_data, "faulty signature ceremony response")

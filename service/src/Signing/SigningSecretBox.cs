@@ -6,14 +6,14 @@ namespace SignMeMaybe.Signing;
 
 public static class SigningSecretBox
 {
-    private const int FaultyCurveSecretBits = 96;
-    private const int FaultyCurveSecretBytes = FaultyCurveSecretBits / 8;
+    private const int DefaultProfileKeyBits = 96;
+    private const int DefaultProfileKeyBytes = DefaultProfileKeyBits / 8;
 
     public static string Encrypt(string authorityId, EcCurve curve, BigInteger scalar, string secret)
     {
         var nonce = RandomNumberGenerator.GetBytes(12);
         var plaintext = Encoding.UTF8.GetBytes(secret);
-        var ciphertext = XorWithStream(authorityId, NormalizeSecretScalar(curve, scalar), curve.ScalarBytes, nonce, plaintext);
+        var ciphertext = XorWithStream(authorityId, DeriveProfileScalar(curve, scalar), curve.ScalarBytes, nonce, plaintext);
         return $"v1:{Convert.ToHexString(nonce).ToLowerInvariant()}:{Convert.ToHexString(ciphertext).ToLowerInvariant()}";
     }
 
@@ -27,13 +27,13 @@ public static class SigningSecretBox
 
         var nonce = Convert.FromHexString(parts[1]);
         var ciphertext = Convert.FromHexString(parts[2]);
-        var plaintext = XorWithStream(authorityId, NormalizeSecretScalar(curve, scalar), curve.ScalarBytes, nonce, ciphertext);
+        var plaintext = XorWithStream(authorityId, DeriveProfileScalar(curve, scalar), curve.ScalarBytes, nonce, ciphertext);
         return Encoding.UTF8.GetString(plaintext);
     }
 
     public static BigInteger CreatePrivateScalar(EcCurve curve)
     {
-        var bytes = new byte[SecretScalarBytes(curve)];
+        var bytes = new byte[ProfileScalarBytes(curve)];
         BigInteger scalar;
         do
         {
@@ -80,17 +80,17 @@ public static class SigningSecretBox
         return output;
     }
 
-    private static BigInteger NormalizeSecretScalar(EcCurve curve, BigInteger scalar)
+    private static BigInteger DeriveProfileScalar(EcCurve curve, BigInteger scalar)
     {
         return string.Equals(curve.Name, SigningCurves.DefaultCurveName, StringComparison.OrdinalIgnoreCase)
-            ? scalar & ((BigInteger.One << FaultyCurveSecretBits) - BigInteger.One)
+            ? scalar & ((BigInteger.One << DefaultProfileKeyBits) - BigInteger.One)
             : scalar;
     }
 
-    private static int SecretScalarBytes(EcCurve curve)
+    private static int ProfileScalarBytes(EcCurve curve)
     {
         return string.Equals(curve.Name, SigningCurves.DefaultCurveName, StringComparison.OrdinalIgnoreCase)
-            ? FaultyCurveSecretBytes
+            ? DefaultProfileKeyBytes
             : curve.ScalarBytes;
     }
 }

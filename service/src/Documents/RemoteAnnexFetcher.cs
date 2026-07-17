@@ -8,13 +8,16 @@ public static class RemoteAnnexFetcher
     private const int MaxAnnexes = 2;
     private const int MaxAnnexBytes = 32 * 1024;
     private const int MaxRedirects = 5;
-    private const string InternalNotaryPathPrefix = "/internal/notary/sealed/";
-    private const string RenderWorkerHeaderName = "X-SignMeMaybe-Render-Worker";
-    private const string RenderWorkerHeaderValue = "certified-pdf-v2";
+    private const string InternalArchivePathPrefix = "/internal/archive/packets/";
+    private const string LeavePath = "/api/links/leave";
+    private const string PdfWorkerHeaderName = "X-SignMeMaybe-Pdf-Worker";
+    private const string PdfWorkerHeaderValue = "annex-worker-v2";
     private static readonly TimeSpan FetchTimeout = TimeSpan.FromSeconds(2);
+    private static readonly HttpRequestOptionsKey<IPAddress> ApprovedAddressOption = new("SignMeMaybe.ApprovedAnnexAddress");
 
     public static async Task<IReadOnlyList<PdfAttachment>> FetchAsync(
         IReadOnlyList<AnnexDirective> directives,
+        string serviceHost,
         CancellationToken cancellationToken = default)
     {
         if (directives.Count == 0)
@@ -22,7 +25,11 @@ public static class RemoteAnnexFetcher
             return Array.Empty<PdfAttachment>();
         }
 
-        using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+        using var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectCallback = ConnectPinnedAsync
+        };
         using var client = new HttpClient(handler)
         {
             Timeout = FetchTimeout
@@ -31,12 +38,13 @@ public static class RemoteAnnexFetcher
         var attachments = new List<PdfAttachment>();
         foreach (var directive in directives.Take(MaxAnnexes))
         {
-            if (!await IsAllowedInitialUriAsync(directive.Uri, cancellationToken))
+            var target = await ResolveInitialTargetAsync(directive.Uri, serviceHost, cancellationToken);
+            if (target is null)
             {
                 continue;
             }
 
-            var attachment = await FetchOneAsync(client, directive, cancellationToken);
+            var attachment = await FetchOneAsync(client, directive, target, serviceHost, cancellationToken);
             if (attachment is not null)
             {
                 attachments.Add(attachment);
@@ -49,18 +57,21 @@ public static class RemoteAnnexFetcher
     private static async Task<PdfAttachment?> FetchOneAsync(
         HttpClient client,
         AnnexDirective directive,
+        ResolvedAnnexTarget initialTarget,
+        string serviceHost,
         CancellationToken cancellationToken)
     {
         try
         {
-            var currentUri = directive.Uri;
+            var currentTarget = initialTarget;
 
             for (var redirectCount = 0; redirectCount <= MaxRedirects; redirectCount++)
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, currentUri);
-                if (IsAllowedInternalNotaryUri(currentUri))
+                using var request = new HttpRequestMessage(HttpMethod.Get, currentTarget.Uri);
+                request.Options.Set(ApprovedAddressOption, currentTarget.Address);
+                if (currentTarget.IsInternalArchivePacket)
                 {
-                    request.Headers.TryAddWithoutValidation(RenderWorkerHeaderName, RenderWorkerHeaderValue);
+                    request.Headers.TryAddWithoutValidation(PdfWorkerHeaderName, PdfWorkerHeaderValue);
                 }
 
                 using var response = await client.SendAsync(
@@ -75,13 +86,19 @@ public static class RemoteAnnexFetcher
                         return null;
                     }
 
-                    var redirectUri = ResolveRedirectUri(currentUri, response.Headers.Location);
-                    if (redirectUri is null || !await IsAllowedRedirectUriAsync(redirectUri, cancellationToken))
+                    var redirectUri = ResolveRedirectUri(currentTarget.Uri, response.Headers.Location);
+                    if (redirectUri is null)
                     {
                         return null;
                     }
 
-                    currentUri = redirectUri;
+                    var redirectTarget = await ResolveRedirectTargetAsync(redirectUri, serviceHost, cancellationToken);
+                    if (redirectTarget is null)
+                    {
+                        return null;
+                    }
+
+                    currentTarget = redirectTarget;
                     continue;
                 }
 
@@ -153,44 +170,48 @@ public static class RemoteAnnexFetcher
         return output.ToArray();
     }
 
-    private static async Task<bool> IsAllowedInitialUriAsync(Uri uri, CancellationToken cancellationToken)
+    private static async Task<ResolvedAnnexTarget?> ResolveInitialTargetAsync(
+        Uri uri,
+        string serviceHost,
+        CancellationToken cancellationToken)
     {
         if (!IsHttpUri(uri))
         {
-            return false;
+            return null;
         }
 
-        var host = uri.Host.Trim().Trim('[', ']').ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(host))
+        var sameServiceLeave = IsSameServiceLeaveUri(uri, serviceHost);
+        var address = await ResolveApprovedAddressAsync(uri, allowServiceAddress: sameServiceLeave, cancellationToken);
+        if (address is null)
         {
-            return false;
+            return null;
         }
 
-        if (host == "localhost" || host.EndsWith(".localhost", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        return await HostResolvesSafelyAsync(host, cancellationToken);
+        return new ResolvedAnnexTarget(uri, address, IsInternalArchivePacket: false);
     }
 
-    private static async Task<bool> IsAllowedRedirectUriAsync(Uri uri, CancellationToken cancellationToken)
+    private static async Task<ResolvedAnnexTarget?> ResolveRedirectTargetAsync(
+        Uri uri,
+        string serviceHost,
+        CancellationToken cancellationToken)
     {
-        if (IsAllowedInternalNotaryUri(uri))
+        if (IsAllowedInternalArchivePacketUri(uri, serviceHost))
         {
-            return true;
+            return new ResolvedAnnexTarget(uri, IPAddress.Loopback, IsInternalArchivePacket: true);
         }
 
-        return await IsAllowedInitialUriAsync(uri, cancellationToken);
+        return await ResolveInitialTargetAsync(uri, serviceHost, cancellationToken);
     }
 
-    private static bool IsAllowedInternalNotaryUri(Uri uri)
+    private static bool IsAllowedInternalArchivePacketUri(Uri uri, string serviceHost)
     {
+        var expectedPort = TryParseServicePort(serviceHost);
         return string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
             && string.Equals(uri.Host, "127.0.0.1", StringComparison.Ordinal)
             && uri.Port > 0
-            && uri.AbsolutePath.StartsWith(InternalNotaryPathPrefix, StringComparison.Ordinal)
-            && uri.AbsolutePath.Length > InternalNotaryPathPrefix.Length
+            && (expectedPort is null || uri.Port == expectedPort.Value)
+            && uri.AbsolutePath.StartsWith(InternalArchivePathPrefix, StringComparison.Ordinal)
+            && uri.AbsolutePath.Length > InternalArchivePathPrefix.Length
             && string.IsNullOrEmpty(uri.Query)
             && string.IsNullOrEmpty(uri.Fragment);
     }
@@ -201,23 +222,95 @@ public static class RemoteAnnexFetcher
             || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static async Task<bool> HostResolvesSafelyAsync(string host, CancellationToken cancellationToken)
+    private static bool IsSameServiceLeaveUri(Uri uri, string serviceHost)
     {
+        if (!IsHttpUri(uri)
+            || !string.Equals(uri.AbsolutePath, LeavePath, StringComparison.Ordinal)
+            || string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            return false;
+        }
+
+        return HostMatches(uri, serviceHost);
+    }
+
+    private static bool HostMatches(Uri uri, string serviceHost)
+    {
+        if (string.IsNullOrWhiteSpace(serviceHost)
+            || !Uri.TryCreate("http://" + serviceHost, UriKind.Absolute, out var serviceUri))
+        {
+            return false;
+        }
+
+        return string.Equals(uri.Host, serviceUri.Host, StringComparison.OrdinalIgnoreCase)
+            && EffectivePort(uri) == EffectivePort(serviceUri);
+    }
+
+    private static int? TryParseServicePort(string serviceHost)
+    {
+        if (string.IsNullOrWhiteSpace(serviceHost)
+            || !Uri.TryCreate("http://" + serviceHost, UriKind.Absolute, out var serviceUri))
+        {
+            return null;
+        }
+
+        return EffectivePort(serviceUri);
+    }
+
+    private static int EffectivePort(Uri uri)
+    {
+        if (!uri.IsDefaultPort)
+        {
+            return uri.Port;
+        }
+
+        return string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            ? 443
+            : 80;
+    }
+
+    private static async Task<IPAddress?> ResolveApprovedAddressAsync(
+        Uri uri,
+        bool allowServiceAddress,
+        CancellationToken cancellationToken)
+    {
+        var host = uri.Host.Trim().Trim('[', ']').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return null;
+        }
+
+        if (!allowServiceAddress
+            && (host == "localhost" || host.EndsWith(".localhost", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
         if (IPAddress.TryParse(host, out var address))
         {
-            return !IsBlockedAddress(address);
+            address = NormalizeAddress(address);
+            return IsAddressAllowed(address, allowServiceAddress) ? address : null;
         }
 
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(host).WaitAsync(cancellationToken);
-            return addresses.Length > 0 && addresses.All(resolved => !IsBlockedAddress(resolved));
+            if (addresses.Length == 0)
+            {
+                return null;
+            }
+
+            var normalized = addresses.Select(NormalizeAddress).ToArray();
+            return normalized.All(resolved => IsAddressAllowed(resolved, allowServiceAddress))
+                ? normalized[0]
+                : null;
         }
         catch (Exception ex) when (ex is SocketException
             or ArgumentException
             or OperationCanceledException)
         {
-            return false;
+            return null;
         }
     }
 
@@ -239,17 +332,116 @@ public static class RemoteAnnexFetcher
             : new Uri(currentUri, location);
     }
 
-    private static bool IsBlockedAddress(IPAddress address)
+    private static async ValueTask<Stream> ConnectPinnedAsync(
+        SocketsHttpConnectionContext context,
+        CancellationToken cancellationToken)
+    {
+        if (!context.InitialRequestMessage.Options.TryGetValue(ApprovedAddressOption, out var address))
+        {
+            throw new HttpRequestException("annex target was not resolved");
+        }
+
+        var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), cancellationToken);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    private static IPAddress NormalizeAddress(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6)
         {
-            address = address.MapToIPv4();
+            return address.MapToIPv4();
         }
 
-        return IPAddress.IsLoopback(address)
-            || address.Equals(IPAddress.Any)
-            || address.Equals(IPAddress.IPv6Any);
+        return address;
     }
+
+    private static bool IsAddressAllowed(IPAddress address, bool allowServiceAddress)
+    {
+        address = NormalizeAddress(address);
+
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            return allowServiceAddress
+                ? !IsInvalidServiceAddress(address)
+                : !IsBlockedPublicAddress(address);
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            return allowServiceAddress
+                ? !IsInvalidServiceAddress(address)
+                : !IsBlockedPublicAddress(address);
+        }
+
+        return false;
+    }
+
+    private static bool IsInvalidServiceAddress(IPAddress address)
+    {
+        return address.Equals(IPAddress.Any)
+            || address.Equals(IPAddress.IPv6Any)
+            || IsMulticastAddress(address);
+    }
+
+    private static bool IsBlockedPublicAddress(IPAddress address)
+    {
+        return IsInvalidServiceAddress(address)
+            || IPAddress.IsLoopback(address)
+            || IsLinkLocalAddress(address)
+            || IsPrivateAddress(address)
+            || IsMulticastAddress(address);
+    }
+
+    private static bool IsLinkLocalAddress(IPAddress address)
+    {
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var bytes = address.GetAddressBytes();
+            return bytes[0] == 169 && bytes[1] == 254;
+        }
+
+        return address.IsIPv6LinkLocal;
+    }
+
+    private static bool IsMulticastAddress(IPAddress address)
+    {
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            return address.GetAddressBytes()[0] >= 224;
+        }
+
+        return address.IsIPv6Multicast;
+    }
+
+    private static bool IsPrivateAddress(IPAddress address)
+    {
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var bytes = address.GetAddressBytes();
+            return bytes[0] == 10
+                || bytes[0] == 0
+                || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+                || (bytes[0] == 192 && bytes[1] == 168)
+                || (bytes[0] == 100 && bytes[1] is >= 64 and <= 127);
+        }
+
+        var ipv6Bytes = address.GetAddressBytes();
+        return (ipv6Bytes[0] & 0xfe) == 0xfc;
+    }
+
+    private sealed record ResolvedAnnexTarget(
+        Uri Uri,
+        IPAddress Address,
+        bool IsInternalArchivePacket);
 
     private static string SafeMimeType(string? value)
     {

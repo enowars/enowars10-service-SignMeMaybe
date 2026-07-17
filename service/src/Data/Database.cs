@@ -71,12 +71,12 @@ public static class Database
                 UNIQUE(contract_id, version_number)
             );
 
-            CREATE TABLE IF NOT EXISTS notary_secrets (
+            CREATE TABLE IF NOT EXISTS contract_packets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 owner_user_id INTEGER NOT NULL,
                 contract_id INTEGER NOT NULL,
-                public_stamp TEXT NOT NULL UNIQUE,
-                secret_path TEXT NOT NULL,
+                public_ticket TEXT NOT NULL UNIQUE,
+                file_path TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 checksum TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -199,17 +199,17 @@ public static class Database
             CREATE INDEX IF NOT EXISTS idx_contract_versions_created_at
                 ON contract_versions(created_at);
 
-            CREATE INDEX IF NOT EXISTS idx_notary_secrets_owner
-                ON notary_secrets(owner_user_id);
+            CREATE INDEX IF NOT EXISTS idx_contract_packets_owner
+                ON contract_packets(owner_user_id);
 
-            CREATE INDEX IF NOT EXISTS idx_notary_secrets_contract
-                ON notary_secrets(contract_id);
+            CREATE INDEX IF NOT EXISTS idx_contract_packets_contract
+                ON contract_packets(contract_id);
 
-            CREATE INDEX IF NOT EXISTS idx_notary_secrets_public_stamp
-                ON notary_secrets(public_stamp);
+            CREATE INDEX IF NOT EXISTS idx_contract_packets_public_ticket
+                ON contract_packets(public_ticket);
 
-            CREATE INDEX IF NOT EXISTS idx_notary_secrets_created_at
-                ON notary_secrets(created_at);
+            CREATE INDEX IF NOT EXISTS idx_contract_packets_created_at
+                ON contract_packets(created_at);
 
             CREATE INDEX IF NOT EXISTS idx_annotations_contract_version
                 ON annotations(contract_version_id);

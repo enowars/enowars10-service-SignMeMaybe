@@ -89,10 +89,10 @@ app.Use(async (context, next) =>
 
 app.UseStaticFiles();
 
-app.MapRootEndpoints(options);
+app.MapRootEndpoints();
 app.MapAuthEndpoints(options);
 app.MapContractEndpoints(options);
-app.MapInternalNotaryEndpoints(options);
+app.MapInternalArchiveEndpoints(options);
 app.MapSigningEndpoints(options);
 app.MapRazorPages();
 
