@@ -40,11 +40,14 @@
         refreshSigningButton: document.getElementById("refresh-signing-button"),
         signatureCeremonyForm: document.getElementById("signature-ceremony-form"),
         ceremonyAuthorityId: document.getElementById("ceremony-authority-id"),
+        ceremonyContractPicker: document.getElementById("ceremony-contract-picker"),
         ceremonyContractReference: document.getElementById("ceremony-contract-reference"),
         ceremonyResult: document.getElementById("ceremony-result"),
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
     };
+
+    let ownerContracts = [];
 
     function setActiveView(viewName) {
         const knownView = elements.viewPanels.some(panel => panel.dataset.viewPanel === viewName);
@@ -96,6 +99,9 @@
         elements.contractViewer.innerHTML = '<p class="muted">Select a contract to inspect its latest version.</p>';
         elements.signingAuthorityList.innerHTML = '<p class="muted">Log in to load signing authorities.</p>';
         elements.ceremonyResult.innerHTML = '<p class="muted">Start a contract signature to inspect and validate the receipt.</p>';
+        ownerContracts = [];
+        elements.ceremonyContractReference.value = "";
+        populateContractPicker();
     }
 
     function renderSession() {
@@ -171,11 +177,15 @@
     async function loadContracts() {
         if (!getToken()) {
             elements.contractList.innerHTML = '<p class="muted">Log in to load records.</p>';
+            ownerContracts = [];
+            populateContractPicker();
             return;
         }
 
         const data = await api("/api/contracts");
         const contracts = Array.isArray(data.contracts) ? data.contracts : [];
+        ownerContracts = contracts;
+        populateContractPicker();
         if (contracts.length === 0) {
             elements.contractList.innerHTML = '<p class="muted">No contracts filed yet.</p>';
             return;
@@ -185,6 +195,56 @@
         for (const contract of contracts) {
             elements.contractList.appendChild(renderContractButton(contract));
         }
+    }
+
+    function populateContractPicker() {
+        const currentReference = elements.ceremonyContractReference.value.trim();
+        elements.ceremonyContractPicker.innerHTML = "";
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = ownerContracts.length === 0
+            ? "No contracts filed yet"
+            : "Select a contract...";
+        elements.ceremonyContractPicker.appendChild(placeholder);
+
+        for (const contract of ownerContracts) {
+            const reference = contract.reference || "";
+            if (!reference) {
+                continue;
+            }
+
+            const latestVersion = contract.latestVersion || {};
+            const option = document.createElement("option");
+            option.value = reference;
+            option.textContent = formatContractOption(contract, latestVersion, reference);
+            elements.ceremonyContractPicker.appendChild(option);
+        }
+
+        selectMatchingContract(currentReference);
+    }
+
+    function formatContractOption(contract, latestVersion, reference) {
+        const title = contract.title || "Untitled contract";
+        const version = latestVersion.versionNumber || "?";
+        const state = latestVersion.approvalState || "draft";
+        return `${title} - v${version} - ${state} - ${shortReference(reference)}`;
+    }
+
+    function shortReference(reference) {
+        return reference.length > 17
+            ? `${reference.slice(0, 12)}...${reference.slice(-4)}`
+            : reference;
+    }
+
+    function setCeremonyContractReference(reference) {
+        elements.ceremonyContractReference.value = reference || "";
+        selectMatchingContract(elements.ceremonyContractReference.value.trim());
+    }
+
+    function selectMatchingContract(reference) {
+        const hasMatch = ownerContracts.some(contract => contract.reference === reference);
+        elements.ceremonyContractPicker.value = hasMatch ? reference : "";
     }
 
     async function loadSigningCurves() {
@@ -395,7 +455,7 @@
         });
 
         document.getElementById("sign-contract-button").addEventListener("click", function () {
-            elements.ceremonyContractReference.value = data.reference;
+            setCeremonyContractReference(data.reference);
             setActiveView("signing");
             showMessage("Contract queued for signing.", false);
         });
@@ -526,6 +586,14 @@
         }
     });
 
+    elements.ceremonyContractPicker.addEventListener("change", function () {
+        setCeremonyContractReference(elements.ceremonyContractPicker.value);
+    });
+
+    elements.ceremonyContractReference.addEventListener("input", function () {
+        selectMatchingContract(elements.ceremonyContractReference.value.trim());
+    });
+
     elements.refreshButton.addEventListener("click", async function () {
         try {
             await loadContracts();
@@ -544,6 +612,7 @@
 
     initializeNavigation();
     renderSession();
+    populateContractPicker();
     loadSigningCurves().catch(error => showMessage(error.message, true));
     if (getToken()) {
         loadContracts().catch(error => showMessage(error.message, true));
