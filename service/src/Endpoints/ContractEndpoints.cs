@@ -420,13 +420,7 @@ public static class ContractEndpoints
             return Results.NotFound(new { error = "contract not found" });
         }
 
-        var storedFilePath = reader.GetString(5);
-        var storedContent = reader.GetString(7);
-        var content = storedContent.Length > 0
-            ? storedContent
-            : File.Exists(storedFilePath) && Path.GetExtension(storedFilePath).Equals(".txt", StringComparison.OrdinalIgnoreCase)
-            ? File.ReadAllText(storedFilePath, Encoding.UTF8)
-            : "";
+        var content = reader.GetString(7);
 
         return Results.Ok(new
         {

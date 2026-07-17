@@ -34,19 +34,22 @@ public static class RootEndpoints
             service = "SignMeMaybe"
         }));
 
-        app.MapGet("/debug/persistence", () =>
+        if (app.Environment.IsDevelopment())
         {
-            return Results.Json(new
+            app.MapGet("/debug/persistence", () =>
             {
-                dbPath = options.DbPath,
-                dbExists = File.Exists(options.DbPath),
-                pdfRoot = options.PdfRoot,
-                pdfRootExists = Directory.Exists(options.PdfRoot),
-                exportRoot = options.ExportRoot,
-                exportRootExists = Directory.Exists(options.ExportRoot),
-                notaryVaultRootExists = Directory.Exists(options.NotaryVaultRoot),
-                maxUploadBytes = options.MaxUploadBytes
+                return Results.Json(new
+                {
+                    dbPath = options.DbPath,
+                    dbExists = File.Exists(options.DbPath),
+                    pdfRoot = options.PdfRoot,
+                    pdfRootExists = Directory.Exists(options.PdfRoot),
+                    exportRoot = options.ExportRoot,
+                    exportRootExists = Directory.Exists(options.ExportRoot),
+                    notaryVaultRootExists = Directory.Exists(options.NotaryVaultRoot),
+                    maxUploadBytes = options.MaxUploadBytes
+                });
             });
-        });
+        }
     }
 }

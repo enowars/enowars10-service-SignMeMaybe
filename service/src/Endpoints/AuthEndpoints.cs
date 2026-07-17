@@ -81,9 +81,22 @@ public static class AuthEndpoints
             expectedPasswordHash = reader.GetString(2);
         }
 
-        if (!Hashing.FixedTimeEquals(expectedPasswordHash, Hashing.HashPassword(request.Password)))
+        if (!Hashing.VerifyPassword(request.Password, expectedPasswordHash, out var needsUpgrade))
         {
             return Results.Unauthorized();
+        }
+
+        if (needsUpgrade)
+        {
+            using var upgrade = connection.CreateCommand();
+            upgrade.CommandText = """
+                UPDATE users
+                SET password_hash = $password_hash
+                WHERE id = $id;
+                """;
+            Database.AddParameter(upgrade, "$password_hash", Hashing.HashPassword(request.Password));
+            Database.AddParameter(upgrade, "$id", userId);
+            upgrade.ExecuteNonQuery();
         }
 
         var token = AuthService.CreateSession(connection, userId);
