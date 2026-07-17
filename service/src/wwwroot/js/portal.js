@@ -40,7 +40,7 @@
         refreshSigningButton: document.getElementById("refresh-signing-button"),
         signatureCeremonyForm: document.getElementById("signature-ceremony-form"),
         ceremonyAuthorityId: document.getElementById("ceremony-authority-id"),
-        ceremonyMessage: document.getElementById("ceremony-message"),
+        ceremonyContractReference: document.getElementById("ceremony-contract-reference"),
         ceremonyResult: document.getElementById("ceremony-result"),
         refreshButton: document.getElementById("refresh-button"),
         messageArea: document.getElementById("message-area")
@@ -95,7 +95,7 @@
         elements.contractList.innerHTML = '<p class="muted">Log in to load records.</p>';
         elements.contractViewer.innerHTML = '<p class="muted">Select a contract to inspect its latest version.</p>';
         elements.signingAuthorityList.innerHTML = '<p class="muted">Log in to load signing authorities.</p>';
-        elements.ceremonyResult.innerHTML = '<p class="muted">Start a ceremony to inspect and validate the receipt.</p>';
+        elements.ceremonyResult.innerHTML = '<p class="muted">Start a contract signature to inspect and validate the receipt.</p>';
     }
 
     function renderSession() {
@@ -285,7 +285,7 @@
         event.preventDefault();
         const authorityId = elements.ceremonyAuthorityId.value.trim();
         const body = {
-            message: elements.ceremonyMessage.value,
+            contractReference: elements.ceremonyContractReference.value.trim(),
             curveName: elements.signingCurve.value
         };
 
@@ -296,10 +296,11 @@
         });
 
         renderCeremonyResult(ceremony);
-        showMessage("Server-side signature ceremony completed.", false);
+        showMessage("Contract signature ceremony completed.", false);
     }
 
     function renderCeremonyResult(ceremony) {
+        const contract = ceremony.contract || {};
         const signature = ceremony.signaturePoint && ceremony.signaturePoint.infinity
             ? "infinity"
             : `${ceremony.signaturePoint.x}, ${ceremony.signaturePoint.y}`;
@@ -307,9 +308,12 @@
             <h3>Receipt ${escapeHtml(ceremony.ceremonyId)}</h3>
             <div class="meta-row">
                 <span><strong>Authority:</strong> ${escapeHtml(ceremony.authorityId)}</span>
+                <span><strong>Contract:</strong> ${escapeHtml(contract.reference || "")}</span>
+                <span><strong>Version:</strong> ${escapeHtml(contract.versionNumber || "")}</span>
                 <span><strong>Curve:</strong> ${escapeHtml(ceremony.curveName)}</span>
                 <span><strong>Status:</strong> ${escapeHtml(ceremony.validationState)}</span>
             </div>
+            <p><strong>Checksum:</strong> <code>${escapeHtml(contract.checksum || "")}</code></p>
             <p><strong>Signature point:</strong> <code>${escapeHtml(signature)}</code></p>
             <p><strong>Receipt tag:</strong> <code>${escapeHtml(ceremony.receiptTag)}</code></p>
             <button type="button" id="validate-ceremony-button" class="secondary">Validate on server</button>`;
@@ -320,8 +324,12 @@
                     method: "POST"
                 });
                 showMessage(validation.valid ? "Receipt validated." : "Receipt rejected.", !validation.valid);
+                if (validation.valid) {
+                    await loadContracts();
+                }
                 elements.ceremonyResult.querySelector(".meta-row").innerHTML = `
                     <span><strong>Authority:</strong> ${escapeHtml(validation.authorityId)}</span>
+                    <span><strong>Contract:</strong> ${escapeHtml(validation.contract && validation.contract.reference ? validation.contract.reference : "")}</span>
                     <span><strong>Status:</strong> ${escapeHtml(validation.validationState)}</span>`;
             } catch (error) {
                 showMessage(error.message, true);
@@ -372,7 +380,10 @@
                 <span><strong>State:</strong> ${escapeHtml(data.approvalState)}</span>
                 <span><strong>Checksum:</strong> ${escapeHtml(data.checksum)}</span>
             </div>
-            <p><button type="button" id="open-pdf-button" class="pdf-link secondary">Open generated PDF</button></p>
+            <p class="button-row">
+                <button type="button" id="open-pdf-button" class="pdf-link secondary">Open generated PDF</button>
+                <button type="button" id="sign-contract-button" class="secondary">Sign contract</button>
+            </p>
             <div class="viewer-content">${escapeHtml(data.content || "")}</div>`;
 
         document.getElementById("open-pdf-button").addEventListener("click", async function () {
@@ -381,6 +392,12 @@
             } catch (error) {
                 showMessage(error.message, true);
             }
+        });
+
+        document.getElementById("sign-contract-button").addEventListener("click", function () {
+            elements.ceremonyContractReference.value = data.reference;
+            setActiveView("signing");
+            showMessage("Contract queued for signing.", false);
         });
     }
 

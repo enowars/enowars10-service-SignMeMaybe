@@ -13,7 +13,6 @@ namespace SignMeMaybe.Endpoints;
 public static class SigningEndpoints
 {
     private const int MaxSigningSecretBytes = 4096;
-    private const int MaxCeremonyMessageBytes = 1024;
 
     public static void MapSigningEndpoints(this WebApplication app, ServiceOptions options)
     {
@@ -267,10 +266,21 @@ public static class SigningEndpoints
             return Results.Unauthorized();
         }
 
-        var message = request.Message.Trim();
-        if (Encoding.UTF8.GetByteCount(message) is < 1 or > MaxCeremonyMessageBytes)
+        if (string.IsNullOrWhiteSpace(request.ContractReference))
         {
-            return Results.BadRequest(new { error = $"message must be between 1 and {MaxCeremonyMessageBytes} bytes" });
+            return Results.BadRequest(new { error = "contractReference must not be empty" });
+        }
+
+        var contractReference = request.ContractReference.Trim();
+        var contract = LoadLatestContractVersion(connection, contractReference);
+        if (contract is null)
+        {
+            return Results.NotFound(new { error = "contract not found" });
+        }
+
+        if (contract.OwnerUserId != user.Id)
+        {
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
         }
 
         var authority = LoadAuthority(connection, authorityId);
@@ -300,27 +310,23 @@ public static class SigningEndpoints
         var privateScalar = EcCurve.ParseHex(authority.PrivateScalar);
         var signaturePoint = curve.Multiply(privateScalar, basePoint);
         var ceremonyId = CreateUniquePublicId(connection, "SGC-");
-        var receiptTag = ComputeReceiptTag(authorityId, ceremonyId, message, basePoint, signaturePoint);
-        var contractReference = string.IsNullOrWhiteSpace(request.ContractReference)
-            ? null
-            : request.ContractReference.Trim();
+        var receiptTag = ComputeReceiptTag(authorityId, ceremonyId, contract, basePoint, signaturePoint);
 
         using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO signature_ceremonies
-                (public_id, authority_id, requester_user_id, contract_reference, message,
+                (public_id, authority_id, requester_user_id, contract_version_id,
                  curve_name, base_point_x, base_point_y, signature_point_x,
                  signature_point_y, signature_point_infinity, receipt_tag)
             VALUES
-                ($public_id, $authority_id, $requester_user_id, $contract_reference, $message,
+                ($public_id, $authority_id, $requester_user_id, $contract_version_id,
                  $curve_name, $base_point_x, $base_point_y, $signature_point_x,
                  $signature_point_y, $signature_point_infinity, $receipt_tag);
             """;
         Database.AddParameter(command, "$public_id", ceremonyId);
         Database.AddParameter(command, "$authority_id", authority.Id);
         Database.AddParameter(command, "$requester_user_id", user.Id);
-        Database.AddParameter(command, "$contract_reference", contractReference);
-        Database.AddParameter(command, "$message", message);
+        Database.AddParameter(command, "$contract_version_id", contract.Id);
         Database.AddParameter(command, "$curve_name", curve.Name);
         Database.AddParameter(command, "$base_point_x", EcCurve.ToHex(basePoint.X));
         Database.AddParameter(command, "$base_point_y", EcCurve.ToHex(basePoint.Y));
@@ -334,8 +340,7 @@ public static class SigningEndpoints
             ceremonyId,
             authority.PublicId,
             user.Username,
-            contractReference,
-            message,
+            contract,
             curve.Name,
             basePoint,
             signaturePoint,
@@ -369,8 +374,7 @@ public static class SigningEndpoints
             loaded.CeremonyId,
             loaded.AuthorityPublicId,
             loaded.RequesterUsername,
-            loaded.ContractReference,
-            loaded.Message,
+            loaded.Contract,
             loaded.CurveName,
             loaded.BasePoint,
             loaded.SignaturePoint,
@@ -407,7 +411,7 @@ public static class SigningEndpoints
             var expectedTag = ComputeReceiptTag(
                 loaded.AuthorityPublicId,
                 loaded.CeremonyId,
-                loaded.Message,
+                loaded.Contract,
                 loaded.BasePoint,
                 expected);
             valid = PointsEqual(expected, loaded.SignaturePoint)
@@ -415,20 +419,35 @@ public static class SigningEndpoints
         }
 
         var validationState = valid ? "valid" : "invalid";
-        using var update = connection.CreateCommand();
-        update.CommandText = """
-            UPDATE signature_ceremonies
-            SET validation_state = $validation_state
-            WHERE public_id = $public_id;
-            """;
-        Database.AddParameter(update, "$validation_state", validationState);
-        Database.AddParameter(update, "$public_id", ceremonyId);
-        update.ExecuteNonQuery();
+        using (var update = connection.CreateCommand())
+        {
+            update.CommandText = """
+                UPDATE signature_ceremonies
+                SET validation_state = $validation_state
+                WHERE public_id = $public_id;
+                """;
+            Database.AddParameter(update, "$validation_state", validationState);
+            Database.AddParameter(update, "$public_id", ceremonyId);
+            update.ExecuteNonQuery();
+        }
+
+        if (valid)
+        {
+            using var updateContract = connection.CreateCommand();
+            updateContract.CommandText = """
+                UPDATE contract_versions
+                SET approval_state = 'signed'
+                WHERE id = $contract_version_id;
+                """;
+            Database.AddParameter(updateContract, "$contract_version_id", loaded.Contract.Id);
+            updateContract.ExecuteNonQuery();
+        }
 
         return Results.Ok(new
         {
             ceremonyId = loaded.CeremonyId,
             authorityId = loaded.AuthorityPublicId,
+            contract = ToContractResponse(loaded.Contract),
             valid,
             validationState
         });
@@ -477,8 +496,7 @@ public static class SigningEndpoints
         string ceremonyId,
         string authorityId,
         string requesterUsername,
-        string? contractReference,
-        string message,
+        ContractVersionRow contract,
         string curveName,
         EcPoint basePoint,
         EcPoint signaturePoint,
@@ -490,13 +508,23 @@ public static class SigningEndpoints
             ceremonyId,
             authorityId,
             requesterUsername,
-            contractReference,
-            message,
+            contract = ToContractResponse(contract),
             curveName,
             basePoint = SigningCurves.ToPublicPoint(basePoint),
             signaturePoint = SigningCurves.ToPublicPoint(signaturePoint),
             receiptTag,
             validationState
+        };
+    }
+
+    private static object ToContractResponse(ContractVersionRow contract)
+    {
+        return new
+        {
+            reference = contract.Reference,
+            title = contract.Title,
+            versionNumber = contract.VersionNumber,
+            checksum = contract.Checksum
         };
     }
 
@@ -527,6 +555,44 @@ public static class SigningEndpoints
 
         error = "";
         return true;
+    }
+
+    private static ContractVersionRow? LoadLatestContractVersion(SqliteConnection connection, string reference)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                v.id,
+                c.owner_user_id,
+                c.public_reference,
+                c.title,
+                v.version_number,
+                v.checksum
+            FROM contracts c
+            JOIN contract_versions v ON v.contract_id = c.id
+            WHERE c.public_reference = $public_reference
+              AND v.version_number = (
+                  SELECT MAX(version_number)
+                  FROM contract_versions
+                  WHERE contract_id = c.id
+              )
+            LIMIT 1;
+            """;
+        Database.AddParameter(command, "$public_reference", reference);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new ContractVersionRow(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetInt32(4),
+            reader.GetString(5));
     }
 
     private static SigningAuthorityRow? LoadAuthority(SqliteConnection connection, string authorityId)
@@ -565,8 +631,12 @@ public static class SigningEndpoints
                 sa.private_scalar,
                 sc.requester_user_id,
                 u.username,
-                sc.contract_reference,
-                sc.message,
+                v.id,
+                c.owner_user_id,
+                c.public_reference,
+                c.title,
+                v.version_number,
+                v.checksum,
                 sc.curve_name,
                 sc.base_point_x,
                 sc.base_point_y,
@@ -578,6 +648,8 @@ public static class SigningEndpoints
             FROM signature_ceremonies sc
             JOIN signing_authorities sa ON sa.id = sc.authority_id
             JOIN users u ON u.id = sc.requester_user_id
+            JOIN contract_versions v ON v.id = sc.contract_version_id
+            JOIN contracts c ON c.id = v.contract_id
             WHERE sc.public_id = $public_id
             LIMIT 1;
             """;
@@ -589,9 +661,9 @@ public static class SigningEndpoints
             return null;
         }
 
-        var signaturePoint = reader.GetInt32(13) == 1
+        var signaturePoint = reader.GetInt32(17) == 1
             ? EcPoint.Infinity
-            : new EcPoint(EcCurve.ParseHex(reader.GetString(11)), EcCurve.ParseHex(reader.GetString(12)));
+            : new EcPoint(EcCurve.ParseHex(reader.GetString(15)), EcCurve.ParseHex(reader.GetString(16)));
 
         return new SignatureCeremonyRow(
             reader.GetString(0),
@@ -600,13 +672,18 @@ public static class SigningEndpoints
             reader.GetString(3),
             reader.GetInt64(4),
             reader.GetString(5),
-            reader.IsDBNull(6) ? null : reader.GetString(6),
-            reader.GetString(7),
-            reader.GetString(8),
-            new EcPoint(EcCurve.ParseHex(reader.GetString(9)), EcCurve.ParseHex(reader.GetString(10))),
+            new ContractVersionRow(
+                reader.GetInt64(6),
+                reader.GetInt64(7),
+                reader.GetString(8),
+                reader.GetString(9),
+                reader.GetInt32(10),
+                reader.GetString(11)),
+            reader.GetString(12),
+            new EcPoint(EcCurve.ParseHex(reader.GetString(13)), EcCurve.ParseHex(reader.GetString(14))),
             signaturePoint,
-            reader.GetString(14),
-            reader.GetString(15));
+            reader.GetString(18),
+            reader.GetString(19));
     }
 
     private static string CreateUniquePublicId(SqliteConnection connection, string prefix)
@@ -638,7 +715,7 @@ public static class SigningEndpoints
     private static string ComputeReceiptTag(
         string authorityId,
         string ceremonyId,
-        string message,
+        ContractVersionRow contract,
         EcPoint basePoint,
         EcPoint signaturePoint)
     {
@@ -646,7 +723,7 @@ public static class SigningEndpoints
             ? "infinity"
             : $"{EcCurve.ToHex(signaturePoint.X)}:{EcCurve.ToHex(signaturePoint.Y)}";
         var material = Encoding.UTF8.GetBytes(
-            $"{authorityId}:{ceremonyId}:{message}:{EcCurve.ToHex(basePoint.X)}:{EcCurve.ToHex(basePoint.Y)}:{signatureText}");
+            $"contract-signature:v1:{authorityId}:{ceremonyId}:{contract.Reference}:{contract.VersionNumber}:{contract.Checksum}:{EcCurve.ToHex(basePoint.X)}:{EcCurve.ToHex(basePoint.Y)}:{signatureText}");
         return Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant();
     }
 
@@ -663,6 +740,14 @@ public static class SigningEndpoints
         string CurveName,
         string PrivateScalar);
 
+    private sealed record ContractVersionRow(
+        long Id,
+        long OwnerUserId,
+        string Reference,
+        string Title,
+        int VersionNumber,
+        string Checksum);
+
     private sealed record SignatureCeremonyRow(
         string CeremonyId,
         string AuthorityPublicId,
@@ -670,8 +755,7 @@ public static class SigningEndpoints
         string PrivateScalar,
         long RequesterUserId,
         string RequesterUsername,
-        string? ContractReference,
-        string Message,
+        ContractVersionRow Contract,
         string CurveName,
         EcPoint BasePoint,
         EcPoint SignaturePoint,

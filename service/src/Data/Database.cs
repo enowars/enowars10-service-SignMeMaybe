@@ -149,8 +149,7 @@ public static class Database
                 public_id TEXT NOT NULL UNIQUE,
                 authority_id INTEGER NOT NULL,
                 requester_user_id INTEGER NOT NULL,
-                contract_reference TEXT,
-                message TEXT NOT NULL,
+                contract_version_id INTEGER NOT NULL,
                 curve_name TEXT NOT NULL,
                 base_point_x TEXT NOT NULL,
                 base_point_y TEXT NOT NULL,
@@ -161,7 +160,8 @@ public static class Database
                 validation_state TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (authority_id) REFERENCES signing_authorities(id) ON DELETE CASCADE,
-                FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE
+                FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (contract_version_id) REFERENCES contract_versions(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS exports (
@@ -251,6 +251,8 @@ public static class Database
                 ON exports(created_at);
             """;
         command.ExecuteNonQuery();
+
+        EnsureSignatureCeremoniesSchema(connection);
 
         EnsureColumn(
             connection,
@@ -365,6 +367,83 @@ public static class Database
             AddParameter(update, "$id", contractId);
             update.ExecuteNonQuery();
         }
+    }
+
+    private static void EnsureSignatureCeremoniesSchema(SqliteConnection connection)
+    {
+        var columnNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA table_info(signature_ceremonies);";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                columnNames.Add(reader.GetString(1));
+            }
+        }
+
+        if (columnNames.Contains("contract_version_id")
+            && !columnNames.Contains("message")
+            && !columnNames.Contains("contract_reference"))
+        {
+            EnsureSignatureCeremonyIndexes(connection);
+            return;
+        }
+
+        using (var drop = connection.CreateCommand())
+        {
+            drop.CommandText = "DROP TABLE IF EXISTS signature_ceremonies;";
+            drop.ExecuteNonQuery();
+        }
+
+        using var create = connection.CreateCommand();
+        create.CommandText = """
+            CREATE TABLE signature_ceremonies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT NOT NULL UNIQUE,
+                authority_id INTEGER NOT NULL,
+                requester_user_id INTEGER NOT NULL,
+                contract_version_id INTEGER NOT NULL,
+                curve_name TEXT NOT NULL,
+                base_point_x TEXT NOT NULL,
+                base_point_y TEXT NOT NULL,
+                signature_point_x TEXT,
+                signature_point_y TEXT,
+                signature_point_infinity INTEGER NOT NULL DEFAULT 0,
+                receipt_tag TEXT NOT NULL,
+                validation_state TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (authority_id) REFERENCES signing_authorities(id) ON DELETE CASCADE,
+                FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (contract_version_id) REFERENCES contract_versions(id) ON DELETE CASCADE
+            );
+
+            """;
+        create.ExecuteNonQuery();
+
+        EnsureSignatureCeremonyIndexes(connection);
+    }
+
+    private static void EnsureSignatureCeremonyIndexes(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_authority
+                ON signature_ceremonies(authority_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_requester
+                ON signature_ceremonies(requester_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_contract_version
+                ON signature_ceremonies(contract_version_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_public_id
+                ON signature_ceremonies(public_id);
+
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_created_at
+                ON signature_ceremonies(created_at);
+            """;
+        command.ExecuteNonQuery();
     }
 
     private static string CreateContractReference()

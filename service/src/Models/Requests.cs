@@ -14,7 +14,6 @@ public sealed record SigningAuthorityCreateRequest(
 public sealed record EcPointRequest(string X, string Y);
 
 public sealed record SignatureCeremonyCreateRequest(
-    string Message,
+    string ContractReference,
     string? CurveName = null,
-    EcPointRequest? BasePoint = null,
-    string? ContractReference = null);
+    EcPointRequest? BasePoint = null);

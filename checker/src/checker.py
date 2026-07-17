@@ -405,12 +405,12 @@ class HttpClient:
         self,
         token: str,
         authority_id: str,
-        message: str,
+        contract_reference: str,
         base_point: tuple[int, int] | None = None,
         curve_name: str = SIGNING_CURVE_NAME,
     ) -> tuple[int, Any]:
         body: JsonObject = {
-            "message": message,
+            "contractReference": contract_reference,
             "curveName": curve_name,
         }
         if base_point is not None:
@@ -953,15 +953,35 @@ async def putflag_signing_authority(
 
     username = random_username()
     password = random_password()
+    title = "Signing Review Contract " + random_suffix(12)
+    content = (
+        "Public signature review packet\n"
+        f"Review marker: {random_suffix(24)}\n"
+        "This contract is safe for public archive metadata."
+    )
     display_name = "Civic Signing Authority " + random_suffix(12)
 
     logger.debug("Registering signing flag owner")
     _user_id, _username, token = await client.register_user(username, password)
 
+    logger.debug("Creating harmless contract for signature ceremony")
+    contract = await client.create_contract(token, title, content)
+    reference = get_string_field(contract, "reference", "signing contract creation response")
+    checksum = get_string_field(contract, "checksum", "signing contract creation response")
+
     logger.debug("Creating signing authority with private signing note")
     created = await client.create_signing_authority(token, display_name, signing_secret=task.flag)
     authority_id = get_string_field(created, "authorityId", "signing authority creation response")
     secret_blob = get_string_field(created, "secretBlob", "signing authority creation response")
+
+    logger.debug("Signing harmless contract with P-256 authority")
+    status, ceremony_data = await client.create_signature_ceremony(token, authority_id, reference)
+    if status not in (200, 201):
+        raise MumbleException(f"Could not create contract signature ceremony: HTTP {status}")
+    ceremony_obj = require_json_object(ceremony_data, "signature ceremony response")
+    ceremony_id = get_string_field(ceremony_obj, "ceremonyId", "signature ceremony response")
+    ceremony_contract = require_json_object(ceremony_obj.get("contract"), "signature ceremony contract response")
+    assert_equals(ceremony_contract.get("reference"), reference, "Signature ceremony targeted wrong contract")
 
     logger.debug("Checking that the signing authority is present in the owner's list")
     authorities = await client.list_signing_authorities(token)
@@ -976,6 +996,11 @@ async def putflag_signing_authority(
             "displayName": display_name,
             "authorityId": authority_id,
             "secretBlob": secret_blob,
+            "title": title,
+            "content": content,
+            "reference": reference,
+            "checksum": checksum,
+            "ceremonyId": ceremony_id,
         },
     )
 
@@ -997,6 +1022,11 @@ async def getflag_signing_authority(
         password = stored["password"]
         authority_id = stored["authorityId"]
         secret_blob = stored["secretBlob"]
+        title = stored["title"]
+        content = stored["content"]
+        reference = stored["reference"]
+        checksum = stored["checksum"]
+        ceremony_id = stored["ceremonyId"]
     except (KeyError, TypeError) as exc:
         raise MumbleException(
             "Missing or broken database entry from putflag; the previous putflag likely failed "
@@ -1032,23 +1062,55 @@ async def getflag_signing_authority(
         raise MumbleException("Private signing note appeared in public metadata")
     assert_equals(matching[0].get("secretBlob"), secret_blob, "Public signing metadata was incorrect")
 
-    logger.debug("Creating and validating normal server-side signature ceremony")
-    status, ceremony_data = await client.create_signature_ceremony(
-        token,
-        authority_id,
-        "archive approval " + random_suffix(16),
+    logger.debug("Checking signed contract content")
+    status, contract_data = await client.latest_contract_version(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve signed contract: HTTP {status}")
+    contract_obj = require_json_object(contract_data, "signed contract response")
+    assert_equals(contract_obj.get("title"), title, "Signed contract title was incorrect")
+    assert_equals(
+        get_string_field(contract_obj, "content", "signed contract response"),
+        content,
+        "Signed contract content was incorrect",
     )
-    if status not in (200, 201):
-        raise MumbleException(f"Could not create signature ceremony: HTTP {status}")
-    ceremony_obj = require_json_object(ceremony_data, "signature ceremony response")
-    ceremony_id = get_string_field(ceremony_obj, "ceremonyId", "signature ceremony response")
+    assert_equals(contract_obj.get("checksum"), checksum, "Signed contract checksum was incorrect")
+    if task.flag in json.dumps(contract_obj, ensure_ascii=False):
+        raise MumbleException("Private signing note appeared in signed contract data")
 
+    logger.debug("Checking public contract metadata for signed contract")
+    status, public_contract_data = await client.public_contracts_by_username(username)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve public signed contract metadata: HTTP {status}")
+    public_contract_obj = require_json_object(public_contract_data, "public signed contract metadata response")
+    public_contracts = public_contract_obj.get("contracts")
+    if not isinstance(public_contracts, list):
+        raise MumbleException("Public signed contract metadata did not contain a contracts list")
+    if task.flag in json.dumps(public_contracts, ensure_ascii=False):
+        raise MumbleException("Private signing note appeared in public contract metadata")
+    matching_contracts = [
+        contract for contract in public_contracts
+        if isinstance(contract, dict)
+        and contract.get("title") == title
+        and public_contract_checksum(contract) == checksum
+    ]
+    if not matching_contracts:
+        raise MumbleException("Signed contract was missing from public contract metadata")
+
+    logger.debug("Validating stored contract signature ceremony")
     status, validation_data = await client.validate_signature_ceremony(token, ceremony_id)
     if status != 200:
         raise MumbleException(f"Could not validate signature ceremony: HTTP {status}")
     validation_obj = require_json_object(validation_data, "signature validation response")
     if validation_obj.get("valid") is not True:
         raise MumbleException("Normal server-side signature ceremony did not validate")
+    validation_contract = require_json_object(validation_obj.get("contract"), "signature validation contract response")
+    assert_equals(validation_contract.get("reference"), reference, "Signature validation targeted wrong contract")
+
+    status, signed_data = await client.latest_contract_version(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve validated signed contract: HTTP {status}")
+    signed_obj = require_json_object(signed_data, "validated signed contract response")
+    assert_equals(signed_obj.get("approvalState"), "signed", "Signed contract approval state was incorrect")
 
 
 @checker.putnoise(0)
@@ -1406,6 +1468,14 @@ async def exploit_faulty_curve_signing(
     logger.debug("Registering attacker account")
     _user_id, _username, token = await client.register_user(username, password)
 
+    logger.debug("Creating attacker-owned contract for signing probes")
+    attacker_contract = await client.create_contract(
+        token,
+        "Fault Review Contract " + random_suffix(12),
+        "Fault review public contract body " + random_suffix(36),
+    )
+    attacker_reference = get_string_field(attacker_contract, "reference", "attacker signing contract creation response")
+
     target_usernames = extract_usernames_from_hints(task)
     if not target_usernames:
         raise MumbleException("Checker task did not contain target metadata")
@@ -1441,7 +1511,7 @@ async def exploit_faulty_curve_signing(
             status, ceremony_data = await client.create_signature_ceremony(
                 token,
                 authority_id,
-                "fault review " + random_suffix(16),
+                attacker_reference,
                 base_point=SIGNING_ATTACK_POINT,
             )
             if status not in (200, 201):

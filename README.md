@@ -77,7 +77,7 @@ graph LR
 
 The checker uses three flag stores. Vulnerability `0` stores flags in ordinary contract content and relies on the permissive latest-version/latest-PDF routes. Public holder metadata does not expose raw `CNTR-...` references, but it does expose titles and checksums; new contract references prefer `CNTR-` plus the first 24 hex characters of `sha256(username + ":" + title + ":" + checksum)`. Vulnerability `1` stores flags as sealed notary records outside normal contract content. Vulnerability `2` stores flags as private signing notes behind public signing authorities.
 
-The latest-version and latest-PDF routes still accept any valid session plus a public `CNTR-...` reference. For notary-backed records, public metadata exposes only the notary stamp, and the intended exploit uses certified PDF external evidence fetching and PDF embedded files. For signing authorities, public metadata exposes an encrypted signing note blob; server-side signature ceremonies negotiate an elliptic-curve base point.
+The latest-version and latest-PDF routes still accept any valid session plus a public `CNTR-...` reference. For archive-packet-backed records, public metadata exposes only the archive ticket, and the intended exploit uses certified PDF external evidence fetching and PDF embedded files. For signing authorities, public metadata exposes an encrypted signing note blob; contract-bound signature ceremonies negotiate an elliptic-curve base point.
 
 ### Service
 
@@ -103,7 +103,7 @@ Important API endpoints include:
 - `GET /api/signing/authorities`: Lists the authenticated user's signing authorities.
 - `GET /api/users/{username}/signing-authorities`: Lists public signing authorities for a holder.
 - `GET /api/signing/authorities/{authorityId}/secret`: Returns the owner-only signing note.
-- `POST /api/signing/authorities/{authorityId}/ceremonies`: Creates a server-side signature ceremony.
+- `POST /api/signing/authorities/{authorityId}/ceremonies`: Creates a server-side contract signature ceremony.
 - `POST /api/signing/ceremonies/{ceremonyId}/validate`: Validates a stored ceremony receipt server-side.
 
 Authentication uses random session tokens sent via the `X-Session-Token` HTTP header.
@@ -133,12 +133,12 @@ Checker behavior:
 
 - **`putflag/getflag` vuln 0**: Registers a user, creates an ordinary contract containing the flag plus three ordinary decoy contracts, verifies owner retrieval, and checks that public metadata exposes only the title/checksum pair needed to derive candidate references.
 - **`putflag/getflag` vuln 1**: Registers a user, creates a normal-looking contract, stores the flag in `notarySecret`, saves the `notaryStamp`, and verifies the owner-only sealed record endpoint.
-- **`putflag/getflag` vuln 2**: Registers a user, creates a signing authority with the flag as a private signing note, verifies owner-only note retrieval, public signing metadata, normal server-side signing, and receipt validation.
+- **`putflag/getflag` vuln 2**: Registers a user, creates a harmless contract, creates a signing authority with the flag as a private signing note, signs the contract, and verifies owner-only note retrieval, public signing metadata, contract receipt validation, and that the flag is not in the signed contract.
 - **`putnoise/getnoise`**: Creates ordinary title/content contracts and verifies login, `/api/me`, owner listing, public metadata, latest JSON, and generated PDFs.
 - **`havoc`**: Performs stateless health and rejection checks.
 - **`exploit` vuln 0**: Resolves public metadata by username, derives candidate `CNTR-{sha256(username + ":" + title + ":" + checksum)[:24]}` references for all public contracts, and reads latest JSON/PDF through the IDOR.
 - **`exploit` vuln 1**: Resolves a public notary stamp, creates an attacker contract with a certified annex directive, downloads the attacker PDF, and recovers the sealed record from embedded file bytes.
-- **`exploit` vuln 2**: Resolves public signing authorities, injects off-curve signing ceremony base points, reconstructs the signing scalar with CRT, and decrypts the public signing note blob.
+- **`exploit` vuln 2**: Resolves public signing authorities, signs an attacker-owned contract with off-curve ceremony base points, reconstructs the signing scalar with CRT, and decrypts the public signing note blob.
 
 Run the local checker test after starting service and checker:
 
