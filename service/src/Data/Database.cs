@@ -182,6 +182,9 @@ public static class Database
             CREATE INDEX IF NOT EXISTS idx_contract_versions_contract
                 ON contract_versions(contract_id);
 
+            CREATE INDEX IF NOT EXISTS idx_contract_versions_contract_version
+                ON contract_versions(contract_id, version_number DESC);
+
             CREATE INDEX IF NOT EXISTS idx_notary_secrets_owner
                 ON notary_secrets(owner_user_id);
 

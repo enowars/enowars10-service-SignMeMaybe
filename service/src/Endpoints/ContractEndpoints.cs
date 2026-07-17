@@ -82,6 +82,10 @@ public static class ContractEndpoints
 
         var directives = AnnexDirectiveParser.Parse(request.Content);
         var attachments = await RemoteAnnexFetcher.FetchAsync(directives, httpRequest.HttpContext.RequestAborted);
+        var pdfBytes = PdfDocumentGenerator.CreateContractPdf(title, request.Content, attachments);
+        var notarySecretChecksum = notarySecretBytes is { Length: > 0 }
+            ? Hashing.Sha256Hex(notarySecretBytes)
+            : null;
 
         string? notaryFilePath = null;
         string? storedFilePath = null;
@@ -133,13 +137,13 @@ public static class ContractEndpoints
                 Database.AddParameter(insertNotary, "$public_stamp", publicStamp);
                 Database.AddParameter(insertNotary, "$secret_path", notaryFilePath);
                 Database.AddParameter(insertNotary, "$display_name", NotaryDisplayName);
-                Database.AddParameter(insertNotary, "$checksum", Hashing.Sha256Hex(notarySecretBytes));
+                Database.AddParameter(insertNotary, "$checksum", notarySecretChecksum);
                 insertNotary.ExecuteNonQuery();
             }
 
             var storedFileName = $"{reference}-{Guid.NewGuid():N}.pdf";
             storedFilePath = Path.Combine(options.PdfRoot, storedFileName);
-            PdfDocumentGenerator.WriteContractPdf(storedFilePath, title, request.Content, attachments);
+            File.WriteAllBytes(storedFilePath, pdfBytes);
 
             using var insertVersion = connection.CreateCommand();
             insertVersion.Transaction = transaction;

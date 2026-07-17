@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using SignMeMaybe.Configuration;
@@ -44,7 +45,7 @@ builder.Services.AddRazorPages();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    options.SerializerOptions.WriteIndented = true;
+    options.SerializerOptions.WriteIndented = false;
 });
 
 var app = builder.Build();
@@ -53,6 +54,34 @@ var options = ServiceOptions.LoadFromEnvironment();
 options.EnsureStorageExists();
 
 Database.Initialize(options.DbPath);
+
+var slowRequestThresholdMsRaw = Environment.GetEnvironmentVariable("SIGNMEMAYBE_SLOW_REQUEST_MS");
+var slowRequestThresholdMs = int.TryParse(slowRequestThresholdMsRaw, out var parsedSlowRequestThresholdMs)
+    && parsedSlowRequestThresholdMs > 0
+        ? parsedSlowRequestThresholdMs
+        : 1_000;
+
+app.Use(async (context, next) =>
+{
+    var stopwatch = Stopwatch.StartNew();
+    try
+    {
+        await next();
+    }
+    finally
+    {
+        stopwatch.Stop();
+        if (stopwatch.ElapsedMilliseconds >= slowRequestThresholdMs)
+        {
+            Console.WriteLine(
+                "slow request: " +
+                $"method={context.Request.Method} " +
+                $"path={context.Request.Path} " +
+                $"status={context.Response.StatusCode} " +
+                $"elapsedMs={stopwatch.ElapsedMilliseconds}");
+        }
+    }
+});
 
 app.UseStaticFiles();
 

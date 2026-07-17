@@ -20,6 +20,14 @@ public static class PdfDocumentGenerator
         string content,
         IReadOnlyList<PdfAttachment>? attachments = null)
     {
+        File.WriteAllBytes(filePath, CreateContractPdf(title, content, attachments));
+    }
+
+    public static byte[] CreateContractPdf(
+        string title,
+        string content,
+        IReadOnlyList<PdfAttachment>? attachments = null)
+    {
         var lines = BuildLines(title, content);
         var pages = lines.Chunk(LinesPerPage).ToList();
         if (pages.Count == 0)
@@ -27,7 +35,7 @@ public static class PdfDocumentGenerator
             pages.Add(Array.Empty<string>());
         }
 
-        File.WriteAllBytes(filePath, BuildPdf(pages, attachments));
+        return BuildPdf(pages, attachments);
     }
 
     private static List<string> BuildLines(string title, string content)
