@@ -295,6 +295,7 @@
             </span>`;
         item.addEventListener("click", () => {
             elements.ceremonyAuthorityId.value = authorityId;
+            elements.ceremonyAuthorityId.setCustomValidity("");
             if (authority.curveName) {
                 elements.signingCurve.value = authority.curveName;
             }
@@ -431,6 +432,10 @@
 
     async function loadContract(reference) {
         const data = await api(`/api/contracts/${encodeURIComponent(reference)}/versions/latest`);
+        const isOwner = data.ownerUsername && data.ownerUsername === localStorage.getItem(userKey);
+        const editButton = isOwner
+            ? '<button type="button" id="edit-contract-button" class="secondary">Edit</button>'
+            : "";
         elements.contractViewer.innerHTML = `
             <h3>${escapeHtml(data.title)}</h3>
             <div class="meta-row">
@@ -442,6 +447,7 @@
             </div>
             <p class="button-row">
                 <button type="button" id="open-pdf-button" class="pdf-link secondary">Open generated PDF</button>
+                ${editButton}
                 <button type="button" id="sign-contract-button" class="secondary">Sign contract</button>
             </p>
             <div class="viewer-content">${escapeHtml(data.content || "")}</div>`;
@@ -454,11 +460,65 @@
             }
         });
 
+        const editContractButton = document.getElementById("edit-contract-button");
+        if (editContractButton) {
+            editContractButton.addEventListener("click", function () {
+                renderContractEditForm(data);
+            });
+        }
+
         document.getElementById("sign-contract-button").addEventListener("click", function () {
             setCeremonyContractReference(data.reference);
             setActiveView("signing");
             showMessage("Contract queued for signing.", false);
         });
+    }
+
+    function renderContractEditForm(contract) {
+        elements.contractViewer.innerHTML = `
+            <h3>Edit ${escapeHtml(contract.reference)}</h3>
+            <form id="contract-edit-form" class="stack">
+                <label>
+                    Title
+                    <input id="edit-contract-title" name="editContractTitle" maxlength="120" value="${escapeHtml(contract.title || "")}" required />
+                </label>
+                <label>
+                    Content
+                    <textarea id="edit-contract-content" name="editContractContent" rows="8" required>${escapeHtml(contract.content || "")}</textarea>
+                    <span class="field-note">Saving overwrites the current stored version and increments the version number.</span>
+                </label>
+                <p class="button-row">
+                    <button type="submit">Save changes</button>
+                    <button type="button" id="cancel-contract-edit-button" class="secondary">Cancel</button>
+                </p>
+            </form>`;
+
+        document.getElementById("contract-edit-form").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            try {
+                await saveContractEdit(contract.reference);
+            } catch (error) {
+                showMessage(error.message, true);
+            }
+        });
+
+        document.getElementById("cancel-contract-edit-button").addEventListener("click", function () {
+            loadContract(contract.reference).catch(error => showMessage(error.message, true));
+        });
+    }
+
+    async function saveContractEdit(reference) {
+        const title = document.getElementById("edit-contract-title").value.trim();
+        const content = document.getElementById("edit-contract-content").value;
+        await api(`/api/contracts/${encodeURIComponent(reference)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, content })
+        });
+
+        showMessage("Contract updated.", false);
+        await loadContracts();
+        await loadContract(reference);
     }
 
     async function openPdf(pdfUrl) {
@@ -592,6 +652,16 @@
 
     elements.ceremonyContractReference.addEventListener("input", function () {
         selectMatchingContract(elements.ceremonyContractReference.value.trim());
+    });
+
+    elements.ceremonyAuthorityId.addEventListener("invalid", function () {
+        if (!elements.ceremonyAuthorityId.value.trim()) {
+            elements.ceremonyAuthorityId.setCustomValidity("Please create and select a Signing Authority first.");
+        }
+    });
+
+    elements.ceremonyAuthorityId.addEventListener("input", function () {
+        elements.ceremonyAuthorityId.setCustomValidity("");
     });
 
     elements.refreshButton.addEventListener("click", async function () {
