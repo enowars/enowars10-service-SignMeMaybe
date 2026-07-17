@@ -36,19 +36,17 @@ EXPECTED_FLAG_RE = re.compile(rf"^{EXPECTED_FLAG_FORMAT}$")
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
 
-SIGNING_CURVE_NAME = "P-256"
-SIGNING_P = 0x10001
-SIGNING_A = 0x02
-SIGNING_SCALAR_BYTES = 6
-SIGNING_SCALAR_LIMIT = 1 << (SIGNING_SCALAR_BYTES * 8)
-SIGNING_ATTACK_POINTS = [
-    (251, 0x9b70, 0xdbda),
-    (257, 0x562d, 0x7727),
-    (263, 0x63f0, 0xfaba),
-    (269, 0x2c81, 0x692a),
-    (271, 0xfc9d, 0xc783),
-    (277, 0x71, 0xfe95),
-]
+SIGNING_CURVE_NAME = "P-521"
+SIGNING_P = 0x01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+SIGNING_A = SIGNING_P - 3
+SIGNING_SCALAR_BYTES = 66
+SIGNING_SCALAR_LIMIT = 0x01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409
+SIGNING_ATTACK_ORDER_BITS = 521
+SIGNING_ATTACK_SINGULAR_D = 3
+SIGNING_ATTACK_POINT = (
+    0xbe3e5c9e1d3ffa5c01ad401cbc7cf3b623a9f005f64b4a5d7646c11728a386eb2b0e2e35ed436a66a069ce7ae480a2f5604f1c0faf5b40352dc40f8d5f8973eaab,
+    0x44aa2fbe202e57208a7fb4289688073222e83b1073d9ff52640c1077f56e9b7b963abd56bad4774839ae3b02712c5425d23b7c2abc35eeaafa0331676f55eb1d13,
+)
 
 
 """
@@ -488,6 +486,7 @@ def public_contract_checksum(contract: JsonObject) -> str | None:
 
 
 EcPoint = tuple[int, int] | None
+Fp2 = tuple[int, int]
 
 
 def ec_inverse(value: int) -> int:
@@ -528,6 +527,50 @@ def ec_multiply(scalar: int, point: EcPoint) -> EcPoint:
     return result
 
 
+def fp2_multiply(left: Fp2, right: Fp2) -> Fp2:
+    left_real, left_imag = left
+    right_real, right_imag = right
+    return (
+        (left_real * right_real + left_imag * right_imag * SIGNING_ATTACK_SINGULAR_D) % SIGNING_P,
+        (left_real * right_imag + left_imag * right_real) % SIGNING_P,
+    )
+
+
+def fp2_square(value: Fp2) -> Fp2:
+    real, imag = value
+    return (
+        (real * real + imag * imag * SIGNING_ATTACK_SINGULAR_D) % SIGNING_P,
+        (2 * real * imag) % SIGNING_P,
+    )
+
+
+def fp2_conjugate(value: Fp2) -> Fp2:
+    real, imag = value
+    return real, (-imag) % SIGNING_P
+
+
+def fp2_pow2(value: Fp2, exponent_bits: int) -> Fp2:
+    for _ in range(exponent_bits):
+        value = fp2_square(value)
+    return value
+
+
+def singular_point_to_fp2(point: EcPoint) -> Fp2:
+    if point is None:
+        return 1, 0
+
+    x, y = point
+    if x == 1:
+        raise MumbleException("Faulty signing point hit the singular node")
+
+    slope = (y * ec_inverse(x - 1)) % SIGNING_P
+    denominator = ec_inverse(slope * slope - SIGNING_ATTACK_SINGULAR_D)
+    return (
+        ((slope * slope + SIGNING_ATTACK_SINGULAR_D) * denominator) % SIGNING_P,
+        (2 * slope * denominator) % SIGNING_P,
+    )
+
+
 def parse_service_point(value: Any) -> EcPoint:
     if not isinstance(value, dict):
         raise MumbleException("Signature ceremony response did not contain a point object")
@@ -542,27 +585,33 @@ def parse_service_point(value: Any) -> EcPoint:
     return int(x, 16), int(y, 16)
 
 
-def discrete_log_small_order(base_point: EcPoint, target: EcPoint, order: int) -> int:
-    current: EcPoint = None
-    for scalar in range(order):
-        if current == target:
-            return scalar
-        current = ec_add(current, base_point)
+def discrete_log_power_of_two(base_point: EcPoint, target: EcPoint, order_bits: int) -> int:
+    base = singular_point_to_fp2(base_point)
+    value = singular_point_to_fp2(target)
+    identity = (1, 0)
+    half_order = fp2_pow2(base, order_bits - 1)
 
-    raise MumbleException("Could not resolve signature ceremony response")
+    if half_order == identity:
+        raise MumbleException("Faulty signing point did not have the expected order")
 
+    scalar = 0
+    known_value = identity
+    bit_value = base
+    for bit_index in range(order_bits):
+        residual = fp2_multiply(value, fp2_conjugate(known_value))
+        probe = fp2_pow2(residual, order_bits - 1 - bit_index)
 
-def crt_pair(left_value: int, left_modulus: int, right_value: int, right_modulus: int) -> tuple[int, int]:
-    factor = ((right_value - left_value) * pow(left_modulus, -1, right_modulus)) % right_modulus
-    modulus = left_modulus * right_modulus
-    return (left_value + left_modulus * factor) % modulus, modulus
+        if probe == identity:
+            pass
+        elif probe == half_order:
+            scalar |= 1 << bit_index
+            known_value = fp2_multiply(known_value, bit_value)
+        else:
+            raise MumbleException("Could not resolve signature ceremony response")
 
+        bit_value = fp2_square(bit_value)
 
-def crt(residues: list[tuple[int, int]]) -> int:
-    value, modulus = residues[0]
-    for residue, next_modulus in residues[1:]:
-        value, modulus = crt_pair(value, modulus, residue, next_modulus)
-    return value
+    return scalar
 
 
 def decrypt_signing_secret(authority_id: str, scalar: int, secret_blob: str) -> bytes:
@@ -1390,28 +1439,23 @@ async def exploit_faulty_curve_signing(
             if curve_name != SIGNING_CURVE_NAME:
                 continue
 
-            residues: list[tuple[int, int]] = []
-            for order, x, y in SIGNING_ATTACK_POINTS:
-                status, ceremony_data = await client.create_signature_ceremony(
-                    token,
-                    authority_id,
-                    "fault review " + random_suffix(16),
-                    base_point=(x, y),
-                )
-                if status not in (200, 201):
-                    logger.debug("Faulty signing point was rejected with HTTP %s", status)
-                    residues = []
-                    break
-
-                ceremony_obj = require_json_object(ceremony_data, "faulty signature ceremony response")
-                signature_point = parse_service_point(ceremony_obj.get("signaturePoint"))
-                residue = discrete_log_small_order((x, y), signature_point, order)
-                residues.append((residue, order))
-
-            if not residues:
+            status, ceremony_data = await client.create_signature_ceremony(
+                token,
+                authority_id,
+                "fault review " + random_suffix(16),
+                base_point=SIGNING_ATTACK_POINT,
+            )
+            if status not in (200, 201):
+                logger.debug("Faulty signing point was rejected with HTTP %s", status)
                 continue
 
-            private_scalar = crt(residues)
+            ceremony_obj = require_json_object(ceremony_data, "faulty signature ceremony response")
+            signature_point = parse_service_point(ceremony_obj.get("signaturePoint"))
+            private_scalar = discrete_log_power_of_two(
+                SIGNING_ATTACK_POINT,
+                signature_point,
+                SIGNING_ATTACK_ORDER_BITS,
+            )
             if not (0 < private_scalar < SIGNING_SCALAR_LIMIT):
                 continue
 
