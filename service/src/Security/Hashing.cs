@@ -5,25 +5,26 @@ namespace SignMeMaybe.Security;
 
 public static class Hashing
 {
-    private const int Pbkdf2Iterations = 210_000;
+    private const int DefaultPbkdf2Iterations = 20_000;
     private const int Pbkdf2SaltBytes = 16;
     private const int Pbkdf2HashBytes = 32;
     private const string Pbkdf2Prefix = "pbkdf2-sha256";
 
     public static string HashPassword(string password)
     {
+        var iterations = GetPbkdf2Iterations();
         var salt = RandomNumberGenerator.GetBytes(Pbkdf2SaltBytes);
         var hash = Rfc2898DeriveBytes.Pbkdf2(
             password,
             salt,
-            Pbkdf2Iterations,
+            iterations,
             HashAlgorithmName.SHA256,
             Pbkdf2HashBytes);
 
         return string.Join(
             "$",
             Pbkdf2Prefix,
-            Pbkdf2Iterations.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            iterations.ToString(System.Globalization.CultureInfo.InvariantCulture),
             Convert.ToHexString(salt).ToLowerInvariant(),
             Convert.ToHexString(hash).ToLowerInvariant());
     }
@@ -32,8 +33,9 @@ public static class Hashing
     {
         needsUpgrade = false;
 
-        if (TryVerifyPbkdf2(password, storedHash))
+        if (TryVerifyPbkdf2(password, storedHash, out var storedIterations))
         {
+            needsUpgrade = storedIterations != GetPbkdf2Iterations();
             return true;
         }
 
@@ -47,12 +49,13 @@ public static class Hashing
         return false;
     }
 
-    private static bool TryVerifyPbkdf2(string password, string storedHash)
+    private static bool TryVerifyPbkdf2(string password, string storedHash, out int iterations)
     {
+        iterations = 0;
         var parts = storedHash.Split('$', StringSplitOptions.TrimEntries);
         if (parts.Length != 4
             || !string.Equals(parts[0], Pbkdf2Prefix, StringComparison.Ordinal)
-            || !int.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var iterations)
+            || !int.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out iterations)
             || iterations <= 0)
         {
             return false;
@@ -80,6 +83,18 @@ public static class Hashing
         {
             return false;
         }
+    }
+
+    private static int GetPbkdf2Iterations()
+    {
+        var raw = Environment.GetEnvironmentVariable("SIGNMEMAYBE_PBKDF2_ITERATIONS");
+        if (int.TryParse(raw, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var iterations)
+            && iterations >= 1_000)
+        {
+            return iterations;
+        }
+
+        return DefaultPbkdf2Iterations;
     }
 
     private static bool IsLegacyHash(string storedHash)
