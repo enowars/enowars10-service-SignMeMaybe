@@ -18,15 +18,18 @@ if (args.Any(arg => string.Equals(arg, "--cleanup-once", StringComparison.Ordina
     }
 
     CleanupResult result;
+    var cleanupStopwatch = Stopwatch.StartNew();
     try
     {
         result = CleanupRunner.Run(cleanupOptions);
     }
     catch (SqliteException ex) when (Database.IsBusyOrLocked(ex))
     {
-        Console.WriteLine("cleanup skipped: database is busy");
+        cleanupStopwatch.Stop();
+        Console.WriteLine($"cleanup skipped: database is busy elapsedMs={cleanupStopwatch.ElapsedMilliseconds}");
         return;
     }
+    cleanupStopwatch.Stop();
 
     Console.WriteLine(
         "cleanup complete: " +
@@ -34,7 +37,8 @@ if (args.Any(arg => string.Equals(arg, "--cleanup-once", StringComparison.Ordina
         $"sessions={result.DeletedSessions} " +
         $"contracts={result.DeletedContracts} " +
         $"exports={result.DeletedExports} " +
-        $"users={result.DeletedUsers}");
+        $"users={result.DeletedUsers} " +
+        $"elapsedMs={cleanupStopwatch.ElapsedMilliseconds}");
     return;
 }
 

@@ -5,14 +5,16 @@ namespace SignMeMaybe.Data;
 
 public static class Database
 {
-    public static SqliteConnection OpenConnection(string dbPath)
+    public static SqliteConnection OpenConnection(string dbPath, int busyTimeoutMs = 5000)
     {
         var connection = new SqliteConnection($"Data Source={dbPath}");
         connection.Open();
 
+        busyTimeoutMs = Math.Max(0, busyTimeoutMs);
+
         using var pragma = connection.CreateCommand();
-        pragma.CommandText = """
-            PRAGMA busy_timeout = 5000;
+        pragma.CommandText = $"""
+            PRAGMA busy_timeout = {busyTimeoutMs};
             PRAGMA foreign_keys = ON;
             """;
         pragma.ExecuteNonQuery();
@@ -176,14 +178,26 @@ public static class Database
             CREATE INDEX IF NOT EXISTS idx_sessions_user
                 ON sessions(user_id);
 
+            CREATE INDEX IF NOT EXISTS idx_sessions_created_at
+                ON sessions(created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_users_created_at
+                ON users(created_at);
+
             CREATE INDEX IF NOT EXISTS idx_contracts_owner
                 ON contracts(owner_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_contracts_created_at
+                ON contracts(created_at);
 
             CREATE INDEX IF NOT EXISTS idx_contract_versions_contract
                 ON contract_versions(contract_id);
 
             CREATE INDEX IF NOT EXISTS idx_contract_versions_contract_version
                 ON contract_versions(contract_id, version_number DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_contract_versions_created_at
+                ON contract_versions(created_at);
 
             CREATE INDEX IF NOT EXISTS idx_notary_secrets_owner
                 ON notary_secrets(owner_user_id);
@@ -193,6 +207,9 @@ public static class Database
 
             CREATE INDEX IF NOT EXISTS idx_notary_secrets_public_stamp
                 ON notary_secrets(public_stamp);
+
+            CREATE INDEX IF NOT EXISTS idx_notary_secrets_created_at
+                ON notary_secrets(created_at);
 
             CREATE INDEX IF NOT EXISTS idx_annotations_contract_version
                 ON annotations(contract_version_id);
@@ -212,6 +229,9 @@ public static class Database
             CREATE INDEX IF NOT EXISTS idx_signing_authorities_public_id
                 ON signing_authorities(public_id);
 
+            CREATE INDEX IF NOT EXISTS idx_signing_authorities_created_at
+                ON signing_authorities(created_at);
+
             CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_authority
                 ON signature_ceremonies(authority_id);
 
@@ -221,8 +241,14 @@ public static class Database
             CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_public_id
                 ON signature_ceremonies(public_id);
 
+            CREATE INDEX IF NOT EXISTS idx_signature_ceremonies_created_at
+                ON signature_ceremonies(created_at);
+
             CREATE INDEX IF NOT EXISTS idx_exports_contract_version
                 ON exports(contract_version_id);
+
+            CREATE INDEX IF NOT EXISTS idx_exports_created_at
+                ON exports(created_at);
             """;
         command.ExecuteNonQuery();
 

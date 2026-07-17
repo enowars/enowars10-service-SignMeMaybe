@@ -7,12 +7,15 @@ namespace SignMeMaybe.Maintenance;
 
 public static class CleanupRunner
 {
+    private const int CleanupBusyTimeoutMs = 100;
+    private const int DeleteBatchSize = 250;
+
     public static CleanupResult Run(ServiceOptions options)
     {
         var cutoffUtc = DateTimeOffset.UtcNow.AddSeconds(-options.CleanupRetentionSeconds).UtcDateTime;
         var cutoffText = cutoffUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-        using var connection = Database.OpenConnection(options.DbPath);
+        using var connection = Database.OpenConnection(options.DbPath, CleanupBusyTimeoutMs);
 
         if (!HasRuntimeSchema(connection))
         {
@@ -21,55 +24,44 @@ public static class CleanupRunner
 
         using var transaction = connection.BeginTransaction();
 
-        var staleFilePaths = LoadStaleFilePaths(connection, transaction, cutoffText);
-        var deletedExports = ExecuteDelete(
+        var staleFilePaths = LoadFilePathsForDeleteBatch(
             connection,
             transaction,
-            "DELETE FROM exports WHERE created_at < $cutoff;",
+            "exports",
+            "file_path",
             cutoffText);
-        var deletedSessions = ExecuteDelete(
+        var deletedExports = ExecuteDeleteBatch(
             connection,
             transaction,
-            "DELETE FROM sessions WHERE created_at < $cutoff;",
+            "exports",
             cutoffText);
-        ExecuteDelete(
+
+        var deletedSessions = ExecuteDeleteBatch(
             connection,
             transaction,
-            "DELETE FROM signature_ceremonies WHERE created_at < $cutoff;",
+            "sessions",
             cutoffText);
-        ExecuteDelete(
+
+        ExecuteDeleteBatch(
             connection,
             transaction,
-            "DELETE FROM signing_authorities WHERE created_at < $cutoff;",
+            "signature_ceremonies",
             cutoffText);
-        var deletedContracts = ExecuteDelete(
+
+        ExecuteDeleteBatch(
             connection,
             transaction,
-            "DELETE FROM contracts WHERE created_at < $cutoff;",
+            "signing_authorities",
             cutoffText);
-        var deletedUsers = ExecuteDelete(
+
+        staleFilePaths.AddRange(LoadContractFilePathsForDeleteBatch(connection, transaction, cutoffText));
+        var deletedContracts = ExecuteDeleteBatch(
             connection,
             transaction,
-            """
-            DELETE FROM users
-            WHERE created_at < $cutoff
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM sessions
-                  WHERE sessions.user_id = users.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM contracts
-                  WHERE contracts.owner_user_id = users.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM signing_authorities
-                  WHERE signing_authorities.owner_user_id = users.id
-              );
-            """,
+            "contracts",
             cutoffText);
+
+        var deletedUsers = ExecuteDeleteUsersBatch(connection, transaction, cutoffText);
 
         transaction.Commit();
 
@@ -82,9 +74,12 @@ public static class CleanupRunner
             }
         }
 
-        deletedFiles += DeleteOldFiles(options.PdfRoot, cutoffUtc, options);
-        deletedFiles += DeleteOldFiles(options.ExportRoot, cutoffUtc, options);
-        deletedFiles += DeleteOldFiles(options.NotaryVaultRoot, cutoffUtc, options);
+        if (ShouldSweepOrphanFiles())
+        {
+            deletedFiles += DeleteOldFiles(options.PdfRoot, cutoffUtc, options);
+            deletedFiles += DeleteOldFiles(options.ExportRoot, cutoffUtc, options);
+            deletedFiles += DeleteOldFiles(options.NotaryVaultRoot, cutoffUtc, options);
+        }
 
         return new CleanupResult(
             deletedFiles,
@@ -94,7 +89,41 @@ public static class CleanupRunner
             deletedUsers);
     }
 
-    private static List<string> LoadStaleFilePaths(
+    private static List<string> LoadFilePathsForDeleteBatch(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string tableName,
+        string columnName,
+        string cutoffText)
+    {
+        var filePaths = new List<string>();
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT {columnName}
+            FROM {tableName}
+            WHERE rowid IN (
+                SELECT rowid
+                FROM {tableName}
+                WHERE created_at < $cutoff
+                ORDER BY rowid ASC
+                LIMIT $limit
+            );
+            """;
+        Database.AddParameter(command, "$cutoff", cutoffText);
+        Database.AddParameter(command, "$limit", DeleteBatchSize);
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            filePaths.Add(reader.GetString(0));
+        }
+
+        return filePaths;
+    }
+
+    private static List<string> LoadContractFilePathsForDeleteBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string cutoffText)
@@ -106,17 +135,26 @@ public static class CleanupRunner
         command.CommandText = """
             SELECT file_path
             FROM contract_versions
-            WHERE created_at < $cutoff
-            UNION
-            SELECT file_path
-            FROM exports
-            WHERE created_at < $cutoff
+            WHERE contract_id IN (
+                SELECT id
+                FROM contracts
+                WHERE created_at < $cutoff
+                ORDER BY id ASC
+                LIMIT $limit
+            )
             UNION
             SELECT secret_path
             FROM notary_secrets
-            WHERE created_at < $cutoff;
+            WHERE contract_id IN (
+                SELECT id
+                FROM contracts
+                WHERE created_at < $cutoff
+                ORDER BY id ASC
+                LIMIT $limit
+            );
             """;
         Database.AddParameter(command, "$cutoff", cutoffText);
+        Database.AddParameter(command, "$limit", DeleteBatchSize);
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -127,17 +165,72 @@ public static class CleanupRunner
         return filePaths;
     }
 
-    private static int ExecuteDelete(
+    private static int ExecuteDeleteBatch(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string commandText,
+        string tableName,
         string cutoffText)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = commandText;
+        command.CommandText = $"""
+            DELETE FROM {tableName}
+            WHERE rowid IN (
+                SELECT rowid
+                FROM {tableName}
+                WHERE created_at < $cutoff
+                ORDER BY rowid ASC
+                LIMIT $limit
+            );
+            """;
         Database.AddParameter(command, "$cutoff", cutoffText);
+        Database.AddParameter(command, "$limit", DeleteBatchSize);
         return command.ExecuteNonQuery();
+    }
+
+    private static int ExecuteDeleteUsersBatch(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string cutoffText)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            DELETE FROM users
+            WHERE rowid IN (
+                SELECT rowid
+                FROM users
+                WHERE created_at < $cutoff
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM sessions
+                      WHERE sessions.user_id = users.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM contracts
+                      WHERE contracts.owner_user_id = users.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM signing_authorities
+                      WHERE signing_authorities.owner_user_id = users.id
+                  )
+                ORDER BY rowid ASC
+                LIMIT $limit
+            );
+            """;
+        Database.AddParameter(command, "$cutoff", cutoffText);
+        Database.AddParameter(command, "$limit", DeleteBatchSize);
+        return command.ExecuteNonQuery();
+    }
+
+    private static bool ShouldSweepOrphanFiles()
+    {
+        var value = Environment.GetEnvironmentVariable("SIGNMEMAYBE_CLEANUP_SWEEP_FILES");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasRuntimeSchema(SqliteConnection connection)
