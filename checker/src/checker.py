@@ -36,7 +36,7 @@ EXPECTED_FLAG_RE = re.compile(rf"^{EXPECTED_FLAG_FORMAT}$")
 checker = Enochecker("SignMeMaybe", SERVICE_PORT)
 app = lambda: checker.app
 
-SIGNING_CURVE_NAME = "civic-archive-p256k"
+SIGNING_CURVE_NAME = "P-256"
 SIGNING_P = 0x10001
 SIGNING_A = 0x02
 SIGNING_SCALAR_BYTES = 6

@@ -157,9 +157,11 @@ public sealed record EcCurve(
 
 public static class SigningCurves
 {
-    public const string DefaultCurveName = "civic-archive-p256k";
-    public const int PrivateScalarBytes = 6;
-    public static readonly BigInteger PrivateScalarLimit = BigInteger.One << (PrivateScalarBytes * 8);
+    private const string P256OrderHex = "0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+
+    public const string DefaultCurveName = "P-256";
+    public const int PrivateScalarBytes = 32;
+    public static readonly BigInteger PrivateScalarLimit = EcCurve.ParseHex(P256OrderHex);
 
     private static readonly IReadOnlyDictionary<string, EcCurve> CurvesByName = CreateCurves()
         .ToDictionary(curve => curve.Name, StringComparer.OrdinalIgnoreCase);
@@ -206,31 +208,13 @@ public static class SigningCurves
     {
         yield return new EcCurve(
             DefaultCurveName,
-            EcCurve.ParseHex("0x10001"),
-            EcCurve.ParseHex("0x02"),
-            EcCurve.ParseHex("0x03"),
-            new EcPoint(EcCurve.ParseHex("0x02"), EcCurve.ParseHex("0xa4bc")),
-            EcCurve.ParseHex("0xff6a"),
-            BigInteger.One);
-
-        yield return new EcCurve(
-            "registry-ledger-p257",
-            EcCurve.ParseHex("0x10001"),
-            EcCurve.ParseHex("0x05"),
-            EcCurve.ParseHex("0x07"),
-            new EcPoint(EcCurve.ParseHex("0x01"), EcCurve.ParseHex("0xcd7f")),
-            EcCurve.ParseHex("0x8093"),
-            BigInteger.One);
-
-        yield return new EcCurve(
-            "P-224",
-            EcCurve.ParseHex("0xffffffffffffffffffffffffffffffff000000000000000000000001"),
-            EcCurve.ParseHex("0xfffffffffffffffffffffffffffffffefffffffffffffffffffffffe"),
-            EcCurve.ParseHex("0xb4050a850c04b3abf54132565044b0b7d7bfd8ba270b39432355ffb4"),
+            EcCurve.ParseHex("0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff"),
+            EcCurve.ParseHex("0xffffffff00000001000000000000000000000000fffffffffffffffffffffffc"),
+            EcCurve.ParseHex("0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
             new EcPoint(
-                EcCurve.ParseHex("0xb70e0cbd6bb4bf7f321390b94a03c1d356c21122343280d6115c1d21"),
-                EcCurve.ParseHex("0xbd376388b5f723fb4c22dfe6cd4375a05a07476444d5819985007e34")),
-            EcCurve.ParseHex("0xffffffffffffffffffffffffffff16a2e0b8f03e13dd29455c5c2a3d"),
+                EcCurve.ParseHex("0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+                EcCurve.ParseHex("0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")),
+            PrivateScalarLimit,
             BigInteger.One);
     }
 }
