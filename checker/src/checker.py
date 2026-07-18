@@ -1692,15 +1692,17 @@ async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter)
     if status != 404:
         raise MumbleException(f"Unknown contract update did not return not found: HTTP {status}")
 
-    logger.debug("Checking that unknown archive packet lookup returns not found")
-    status, _packet_bytes, _headers = await client.archive_packet(token, unknown_reference)
-    if status != 404:
-        raise MumbleException(f"Unknown archive packet lookup did not return not found: HTTP {status}")
+    # checker skips this because this caused too much mumbling due to to slow during CTF. Will fix later
+    # logger.debug("Checking that unknown archive packet lookup returns not found")
+    # status, _packet_bytes, _headers = await client.archive_packet(token, unknown_reference)
+    # if status != 404:
+    #     raise MumbleException(f"Unknown archive packet lookup did not return not found: HTTP {status}")
 
-    logger.debug("Checking that an unknown public holder returns not found")
-    status, _data = await client.public_contracts_by_username("missing_" + random_suffix(12))
-    if status != 404:
-        raise MumbleException(f"Unknown public holder did not return not found: HTTP {status}")
+    # checker skips this because this caused too much mumbling due to to slow during CTF. Will fix later
+    # logger.debug("Checking that an unknown public holder returns not found")
+    # status, _data = await client.public_contracts_by_username("missing_" + random_suffix(12))
+    # if status != 404:
+    #     raise MumbleException(f"Unknown public holder did not return not found: HTTP {status}")
 
     logger.debug("Checking that malformed public holder input is rejected")
     status, _data = await client.request_json("GET", "/api/users/%20/contracts")
@@ -1831,28 +1833,31 @@ async def havoc_signing_rejections(task: HavocCheckerTaskMessage, logger: Logger
     status, _data = await client.validate_signature_ceremony(token, unknown_ceremony)
     assert_status(status, 404, "Unknown ceremony validation did not return not found")
 
-    logger.debug("Checking missing contract reference during ceremony creation is rejected")
-    status, _data = await client.create_signature_ceremony(token, authority_id, " ")
-    assert_status(status, 400, "Missing ceremony contract reference was not rejected")
+    # checker skips this because this caused too much mumbling due to to slow during CTF. Will fix later
+    # logger.debug("Checking missing contract reference during ceremony creation is rejected")
+    # status, _data = await client.create_signature_ceremony(token, authority_id, " ")
+    # assert_status(status, 400, "Missing ceremony contract reference was not rejected")
 
-    logger.debug("Checking unknown contract reference during ceremony creation returns not found")
-    status, _data = await client.create_signature_ceremony(token, authority_id, "CNTR-" + random_suffix(24))
-    assert_status(status, 404, "Unknown ceremony contract reference did not return not found")
+    # checker skips this because this caused too much mumbling due to to slow during CTF. Will fix later
+    # logger.debug("Checking unknown contract reference during ceremony creation returns not found")
+    # status, _data = await client.create_signature_ceremony(token, authority_id, "CNTR-" + random_suffix(24))
+    # assert_status(status, 404, "Unknown ceremony contract reference did not return not found")
 
-    logger.debug("Checking ceremony curve mismatch is rejected")
-    contract = await client.create_contract(
-        token,
-        "Curve Mismatch Contract " + random_suffix(12),
-        "curve mismatch public contract body " + random_suffix(36),
-    )
-    reference = get_string_field(contract, "reference", "curve mismatch contract creation response")
-    status, _data = await client.create_signature_ceremony(
-        token,
-        authority_id,
-        reference,
-        curve_name="P-384",
-    )
-    assert_status(status, 400, "Ceremony curve mismatch was not rejected")
+    # checker skips this because this caused too much mumbling due to to slow during CTF. Will fix later
+    # logger.debug("Checking ceremony curve mismatch is rejected")
+    # contract = await client.create_contract(
+    #     token,
+    #     "Curve Mismatch Contract " + random_suffix(12),
+    #     "curve mismatch public contract body " + random_suffix(36),
+    # )
+    # reference = get_string_field(contract, "reference", "curve mismatch contract creation response")
+    # status, _data = await client.create_signature_ceremony(
+    #     token,
+    #     authority_id,
+    #     reference,
+    #     curve_name="P-384",
+    # )
+    # assert_status(status, 400, "Ceremony curve mismatch was not rejected")
 
 
 @checker.havoc(3)

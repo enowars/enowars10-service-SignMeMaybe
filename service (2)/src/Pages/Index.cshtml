@@ -1,0 +1,265 @@
+@page
+@model SignMeMaybe.Pages.IndexModel
+@{
+    ViewData["Title"] = "SignMeMaybe";
+}
+
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"]</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    <div class="page-shell">
+        <header class="top-bar">
+            <div class="brand-lockup" aria-label="SignMeMaybe">
+                <img class="brand-mark" src="~/img/archive-mark.svg" asp-append-version="true" alt="" aria-hidden="true" />
+                <div>
+                    <p class="eyebrow">Federal Filing Workstation</p>
+                    <h1>SignMeMaybe</h1>
+                    <p class="brand-subtitle">Departmental Contract Registry</p>
+                </div>
+            </div>
+            <div class="system-strip" aria-label="System status">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>Archive node online</span>
+                <span class="status-divider" aria-hidden="true"></span>
+                <span>Fax queue idle</span>
+            </div>
+        </header>
+
+        <nav class="view-tabs" aria-label="Application sections">
+            <button type="button" class="view-tab is-active" data-view="access" aria-controls="view-access" aria-selected="true">Access Terminal</button>
+            <button type="button" class="view-tab" data-view="intake" aria-controls="view-intake" aria-selected="false">Record Intake</button>
+            <button type="button" class="view-tab" data-view="archive" aria-controls="view-archive" aria-selected="false">Archive Cabinet</button>
+            <button type="button" class="view-tab" data-view="public" aria-controls="view-public" aria-selected="false">Public Ledger</button>
+            <button type="button" class="view-tab" data-view="signing" aria-controls="view-signing" aria-selected="false">Signing Desk</button>
+        </nav>
+
+        <main class="portal-workspace">
+            <section id="view-access" class="view-page is-active" data-view-panel="access" aria-labelledby="access-title">
+                <div class="page-titlebar">
+                    <div>
+                        <p class="eyebrow">Identity terminal</p>
+                        <h2 id="access-title">Access Terminal</h2>
+                    </div>
+                    <span class="office-stamp">Desk A-01</span>
+                </div>
+
+                <div class="view-layout access-layout">
+                    <section class="panel auth-panel">
+                        <div class="panel-header">
+                            <p class="eyebrow">Citizen credentials</p>
+                            <h3>Session control</h3>
+                        </div>
+
+                        <form id="auth-form" class="stack">
+                            <label>
+                                Username
+                                <input id="username" name="username" autocomplete="username" minlength="3" maxlength="40" required />
+                            </label>
+                            <label>
+                                Password
+                                <input id="password" name="password" type="password" autocomplete="current-password" minlength="6" maxlength="200" required />
+                            </label>
+                            <div class="button-row">
+                                <button type="button" id="register-button">Register</button>
+                                <button type="submit" id="login-button" class="secondary">Log in</button>
+                            </div>
+                        </form>
+                    </section>
+
+                    <section class="panel status-panel">
+                        <div class="panel-header">
+                            <p class="eyebrow">Active clearance</p>
+                            <h3>Operator badge</h3>
+                        </div>
+                        <div id="session-card" class="session-card hidden" aria-live="polite">
+                            <p id="session-user">No active session</p>
+                            <button type="button" id="logout-button" class="ghost">End session</button>
+                        </div>
+                        <div class="memo-card">
+                            <strong>Office notice</strong>
+                            <span>All records are filed through the central archive node.</span>
+                        </div>
+                    </section>
+                </div>
+            </section>
+
+            <section id="view-intake" class="view-page" data-view-panel="intake" aria-labelledby="compose-title" hidden>
+                <div class="page-titlebar">
+                    <div>
+                        <p class="eyebrow">Record intake</p>
+                        <h2 id="compose-title">Create contract</h2>
+                    </div>
+                    <span class="office-stamp">Form 14-C</span>
+                </div>
+
+                <section class="panel compose-panel">
+                    <form id="contract-form" class="stack">
+                        <label>
+                            Title
+                            <input id="contract-title" name="title" maxlength="120" required />
+                        </label>
+                        <label>
+                            Content
+                            <textarea id="contract-content" name="content" rows="8" required></textarea>
+                            <span class="field-note">PDF export supports linked annex material declared in contract markup.</span>
+                        </label>
+                        <button type="submit">Seal record</button>
+                    </form>
+                </section>
+            </section>
+
+            <section id="view-archive" class="view-page" data-view-panel="archive" aria-labelledby="records-title" hidden>
+                <div class="page-titlebar">
+                    <div>
+                        <p class="eyebrow">Private archive</p>
+                        <h2 id="records-title">Archive Cabinet</h2>
+                    </div>
+                    <button type="button" id="refresh-button" class="icon-button" title="Refresh records" aria-label="Refresh records">Refresh</button>
+                </div>
+
+                <div class="archive-layout">
+                    <section class="panel list-panel">
+                        <div class="panel-header">
+                            <p class="eyebrow">Drawer index</p>
+                            <h3>My contracts</h3>
+                        </div>
+                        <div id="contract-list" class="contract-list" aria-live="polite">
+                            <p class="muted">Log in to load records.</p>
+                        </div>
+                    </section>
+
+                    <section class="panel viewer-panel" aria-labelledby="viewer-title">
+                        <div class="panel-header">
+                            <p class="eyebrow">Document viewer</p>
+                            <h3 id="viewer-title">Latest version</h3>
+                        </div>
+                        <article id="contract-viewer" class="contract-viewer">
+                            <p class="muted">Select a contract to inspect its latest version.</p>
+                        </article>
+                    </section>
+                </div>
+            </section>
+
+            <section id="view-public" class="view-page" data-view-panel="public" aria-labelledby="public-title" hidden>
+                <div class="page-titlebar">
+                    <div>
+                        <p class="eyebrow">Public index</p>
+                        <h2 id="public-title">Public Ledger</h2>
+                    </div>
+                    <span class="office-stamp">Reference Room</span>
+                </div>
+
+                <section class="panel public-panel">
+                    <form id="public-lookup-form" class="stack">
+                        <label>
+                            Holder username
+                            <input id="public-username" name="publicUsername" autocomplete="off" minlength="3" maxlength="40" required />
+                        </label>
+                        <button type="submit" class="secondary">Search archive</button>
+                    </form>
+
+                    <div id="public-contract-list" class="contract-list public-contract-list" aria-live="polite">
+                        <p class="muted">Search a holder name to inspect public contract metadata.</p>
+                    </div>
+                </section>
+            </section>
+
+            <section id="view-signing" class="view-page" data-view-panel="signing" aria-labelledby="signing-title" hidden>
+                <div class="page-titlebar">
+                    <div>
+                        <p class="eyebrow">Signing desk</p>
+                        <h2 id="signing-title">Signature ceremonies</h2>
+                    </div>
+                    <button type="button" id="refresh-signing-button" class="icon-button" title="Refresh signing desk" aria-label="Refresh signing desk">Refresh</button>
+                </div>
+
+                <div class="desk-grid">
+                    <form id="signing-authority-form" class="panel stack desk-section">
+                        <div class="panel-header">
+                            <p class="eyebrow">Authority register</p>
+                            <h3>Create signing authority</h3>
+                        </div>
+                        <label>
+                            Display name
+                            <input id="signing-display-name" name="signingDisplayName" maxlength="120" required />
+                        </label>
+                        <label>
+                            Curve profile
+                            <select id="signing-curve" name="signingCurve"></select>
+                        </label>
+                        <label>
+                            Private signing note
+                            <textarea id="signing-secret" name="signingSecret" rows="4"></textarea>
+                        </label>
+                        <button type="submit">Create authority</button>
+                    </form>
+
+                    <section class="panel stack desk-section">
+                        <div class="panel-header">
+                            <p class="eyebrow">Local drawer</p>
+                            <h3>My signing authorities</h3>
+                        </div>
+                        <div id="signing-authority-list" class="contract-list" aria-live="polite">
+                            <p class="muted">Log in to load signing authorities.</p>
+                        </div>
+                    </section>
+
+                    <form id="signing-lookup-form" class="panel stack desk-section">
+                        <div class="panel-header">
+                            <p class="eyebrow">Public signing registry</p>
+                            <h3>Authority lookup</h3>
+                        </div>
+                        <label>
+                            Holder username
+                            <input id="signing-public-username" name="signingPublicUsername" autocomplete="off" minlength="3" maxlength="40" required />
+                        </label>
+                        <button type="submit" class="secondary">Search authorities</button>
+                        <div id="signing-public-list" class="contract-list public-contract-list" aria-live="polite">
+                            <p class="muted">Search a holder name to inspect public signing authorities.</p>
+                        </div>
+                    </form>
+
+                    <form id="signature-ceremony-form" class="panel stack desk-section">
+                        <div class="panel-header">
+                            <p class="eyebrow">Ceremony ledger</p>
+                            <h3>Start ceremony</h3>
+                        </div>
+                        <label>
+                            Authority ID
+                            <input id="ceremony-authority-id" name="ceremonyAuthorityId" autocomplete="off" required />
+                        </label>
+                        <label>
+                            My contracts
+                            <select id="ceremony-contract-picker" name="ceremonyContractPicker"></select>
+                        </label>
+                        <label>
+                            Contract reference
+                            <input id="ceremony-contract-reference" name="ceremonyContractReference" autocomplete="off" required />
+                        </label>
+                        <button type="submit">Sign contract</button>
+                        <article id="ceremony-result" class="result-box">
+                            <p class="muted">Start a contract signature to inspect and validate the receipt.</p>
+                        </article>
+                    </form>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer-strip" aria-label="Current workstation state">
+            <span>Current desk: <strong id="active-view-label">Access Terminal</strong></span>
+            <span>Printer: ready</span>
+            <span>Protocol: paper-compatible</span>
+        </footer>
+
+        <aside id="message-area" class="message-area" aria-live="polite"></aside>
+    </div>
+
+    <script src="~/js/portal.js" asp-append-version="true"></script>
+</body>
+</html>

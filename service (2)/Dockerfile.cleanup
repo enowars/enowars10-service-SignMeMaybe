@@ -1,0 +1,39 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY src/SignMeMaybe.csproj ./
+RUN dotnet restore SignMeMaybe.csproj
+
+COPY src/. ./
+RUN dotnet publish SignMeMaybe.csproj -c Release -o /app/publish --no-restore
+
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cron \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /data /app
+
+WORKDIR /app
+
+COPY --from=build /app/publish ./
+COPY cleanup/cleanup-crontab /etc/cron.d/signmemaybe-cleanup
+COPY cleanup/cleanup-entrypoint.sh /app/cleanup-entrypoint.sh
+COPY cleanup/run-cleanup.sh /app/run-cleanup.sh
+
+RUN chmod 0644 /etc/cron.d/signmemaybe-cleanup \
+    && chmod +x /app/cleanup-entrypoint.sh /app/run-cleanup.sh \
+    && crontab /etc/cron.d/signmemaybe-cleanup
+
+ENV SIGNMEMAYBE_DB_PATH=/data/signmemaybe.sqlite3
+ENV SIGNMEMAYBE_PDF_ROOT=/data/pdfs
+ENV SIGNMEMAYBE_EXPORT_ROOT=/data/exports
+ENV SIGNMEMAYBE_PACKET_ROOT=/data/packets
+ENV SIGNMEMAYBE_MAX_UPLOAD_BYTES=10485760
+ENV SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS=720
+ENV SIGNMEMAYBE_PCAP_ROOT=/pcaps
+ENV SIGNMEMAYBE_PCAP_RETENTION_MINUTES=30
+
+CMD ["/app/cleanup-entrypoint.sh"]

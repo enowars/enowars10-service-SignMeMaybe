@@ -1,0 +1,62 @@
+services:
+  signmemaybe:
+    build: .
+    # The code should be copied into the container using COPY.
+    # Mount the data folder writable, so that information can be persisted across restarts.
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    volumes:
+      - ./data/:/data:rw
+
+    # Define the port mapping (external:internal port)
+    ports:
+      - "1984:1984"
+
+    environment:
+      ASPNETCORE_URLS: "http://0.0.0.0:1984"
+      ASPNETCORE_ENVIRONMENT: "Production"
+      SIGNMEMAYBE_DB_PATH: "/data/signmemaybe.sqlite3"
+      SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
+      SIGNMEMAYBE_EXPORT_ROOT: "/data/exports"
+      SIGNMEMAYBE_PACKET_ROOT: "/data/packets"
+      SIGNMEMAYBE_MAX_UPLOAD_BYTES: "10485760"
+      SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS: "720"
+      SIGNMEMAYBE_PBKDF2_ITERATIONS: "20000"
+
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1
+
+  signmemaybe-cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile.cleanup
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./data/:/data:rw
+      - /pcaps:/pcaps:rw
+    environment:
+      SIGNMEMAYBE_DB_PATH: "/data/signmemaybe.sqlite3"
+      SIGNMEMAYBE_PDF_ROOT: "/data/pdfs"
+      SIGNMEMAYBE_EXPORT_ROOT: "/data/exports"
+      SIGNMEMAYBE_PACKET_ROOT: "/data/packets"
+      SIGNMEMAYBE_MAX_UPLOAD_BYTES: "10485760"
+      SIGNMEMAYBE_CLEANUP_RETENTION_SECONDS: "720"
+      SIGNMEMAYBE_CLEANUP_SWEEP_FILES: "false"
+      SIGNMEMAYBE_PCAP_ROOT: "/pcaps"
+      SIGNMEMAYBE_PCAP_RETENTION_MINUTES: "30"
+    depends_on:
+      - signmemaybe
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.1
+    
