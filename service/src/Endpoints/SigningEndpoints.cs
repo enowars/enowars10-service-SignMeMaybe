@@ -21,8 +21,8 @@ public static class SigningEndpoints
             curves = SigningCurves.All.Select(SigningCurves.ToPublicCurve)
         }));
 
-        app.MapPost("/api/signing/authorities", (HttpRequest httpRequest, SigningAuthorityCreateRequest request) =>
-            CreateSigningAuthority(httpRequest, request, options));
+        app.MapPost("/api/signing/authorities", async (HttpRequest httpRequest, SigningAuthorityCreateRequest request) =>
+            await CreateSigningAuthority(httpRequest, request, options));
 
         app.MapGet("/api/signing/authorities", (HttpRequest httpRequest) =>
             ListOwnSigningAuthorities(httpRequest, options));
@@ -33,25 +33,28 @@ public static class SigningEndpoints
         app.MapGet("/api/signing/authorities/{authorityId}/secret", (HttpRequest httpRequest, string authorityId) =>
             GetOwnerSigningSecret(httpRequest, authorityId, options));
 
-        app.MapPost("/api/signing/authorities/{authorityId}/ceremonies", (HttpRequest httpRequest, string authorityId, SignatureCeremonyCreateRequest request) =>
-            CreateSignatureCeremony(httpRequest, authorityId, request, options));
+        app.MapPost("/api/signing/authorities/{authorityId}/ceremonies", async (HttpRequest httpRequest, string authorityId, SignatureCeremonyCreateRequest request) =>
+            await CreateSignatureCeremony(httpRequest, authorityId, request, options));
 
         app.MapGet("/api/signing/ceremonies/{ceremonyId}", (HttpRequest httpRequest, string ceremonyId) =>
             GetSignatureCeremony(httpRequest, ceremonyId, options));
 
-        app.MapPost("/api/signing/ceremonies/{ceremonyId}/validate", (HttpRequest httpRequest, string ceremonyId) =>
-            ValidateSignatureCeremony(httpRequest, ceremonyId, options));
+        app.MapPost("/api/signing/ceremonies/{ceremonyId}/validate", async (HttpRequest httpRequest, string ceremonyId) =>
+            await ValidateSignatureCeremony(httpRequest, ceremonyId, options));
     }
 
-    private static IResult CreateSigningAuthority(
+    private static async Task<IResult> CreateSigningAuthority(
         HttpRequest httpRequest,
         SigningAuthorityCreateRequest request,
         ServiceOptions options)
     {
-        using var connection = Database.OpenConnection(options.DbPath);
-        if (!AuthService.TryGetUser(connection, httpRequest, out var user))
+        AuthenticatedUser user;
+        using (var authConnection = Database.OpenConnection(options.DbPath))
         {
-            return Results.Unauthorized();
+            if (!AuthService.TryGetUser(authConnection, httpRequest, out user))
+            {
+                return Results.Unauthorized();
+            }
         }
 
         var displayName = request.DisplayName.Trim();
@@ -74,45 +77,60 @@ public static class SigningEndpoints
             return Results.BadRequest(new { error = $"signingSecret exceeds max size of {MaxSigningSecretBytes} bytes" });
         }
 
-        var authorityId = CreateUniquePublicId(connection, "SIG-");
-        var privateScalar = SigningSecretBox.CreatePrivateScalar(curve);
-        var publicKey = curve.Multiply(privateScalar, curve.Generator);
-        var secretBlob = string.IsNullOrEmpty(request.SigningSecret)
-            ? null
-            : SigningSecretBox.Encrypt(authorityId, curve, privateScalar, request.SigningSecret);
-        var profileDigest = string.IsNullOrEmpty(request.SigningSecret)
-            ? null
-            : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.SigningSecret))).ToLowerInvariant();
-
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO signing_authorities
-                (public_id, owner_user_id, display_name, curve_name, private_scalar,
-                 public_key_x, public_key_y, secret_blob, secret_checksum)
-            VALUES
-                ($public_id, $owner_user_id, $display_name, $curve_name, $private_scalar,
-                 $public_key_x, $public_key_y, $secret_blob, $secret_checksum);
-            """;
-        Database.AddParameter(command, "$public_id", authorityId);
-        Database.AddParameter(command, "$owner_user_id", user.Id);
-        Database.AddParameter(command, "$display_name", displayName);
-        Database.AddParameter(command, "$curve_name", curve.Name);
-        Database.AddParameter(command, "$private_scalar", EcCurve.ToFixedHex(privateScalar, curve.ScalarBytes));
-        Database.AddParameter(command, "$public_key_x", EcCurve.ToHex(publicKey.X));
-        Database.AddParameter(command, "$public_key_y", EcCurve.ToHex(publicKey.Y));
-        Database.AddParameter(command, "$secret_blob", secretBlob);
-        Database.AddParameter(command, "$secret_checksum", profileDigest);
-        command.ExecuteNonQuery();
-
-        return Results.Created($"/api/signing/authorities/{Uri.EscapeDataString(authorityId)}", new
+        for (var attempt = 0; attempt < 16; attempt++)
         {
-            authorityId,
-            ownerUsername = user.Username,
-            displayName,
-            curveName = curve.Name,
-            publicKey = SigningCurves.ToPublicPoint(publicKey),
-            secretBlob
-        });
+            var authorityId = SigningSecretBox.CreatePublicId("SIG-");
+            var privateScalar = SigningSecretBox.CreatePrivateScalar(curve);
+            var publicKey = curve.Multiply(privateScalar, curve.Generator);
+            var secretBlob = string.IsNullOrEmpty(request.SigningSecret)
+                ? null
+                : SigningSecretBox.Encrypt(authorityId, curve, privateScalar, request.SigningSecret);
+            var profileDigest = string.IsNullOrEmpty(request.SigningSecret)
+                ? null
+                : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.SigningSecret))).ToLowerInvariant();
+
+            using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
+            using var connection = Database.OpenConnection(options.DbPath);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO signing_authorities
+                    (public_id, owner_user_id, display_name, curve_name, private_scalar,
+                     public_key_x, public_key_y, secret_blob, secret_checksum)
+                VALUES
+                    ($public_id, $owner_user_id, $display_name, $curve_name, $private_scalar,
+                     $public_key_x, $public_key_y, $secret_blob, $secret_checksum);
+                """;
+            Database.AddParameter(command, "$public_id", authorityId);
+            Database.AddParameter(command, "$owner_user_id", user.Id);
+            Database.AddParameter(command, "$display_name", displayName);
+            Database.AddParameter(command, "$curve_name", curve.Name);
+            Database.AddParameter(command, "$private_scalar", EcCurve.ToFixedHex(privateScalar, curve.ScalarBytes));
+            Database.AddParameter(command, "$public_key_x", EcCurve.ToHex(publicKey.X));
+            Database.AddParameter(command, "$public_key_y", EcCurve.ToHex(publicKey.Y));
+            Database.AddParameter(command, "$secret_blob", secretBlob);
+            Database.AddParameter(command, "$secret_checksum", profileDigest);
+
+            try
+            {
+                command.ExecuteNonQuery();
+            }
+            catch (SqliteException ex) when (IsUniqueConstraintViolation(ex))
+            {
+                continue;
+            }
+
+            return Results.Created($"/api/signing/authorities/{Uri.EscapeDataString(authorityId)}", new
+            {
+                authorityId,
+                ownerUsername = user.Username,
+                displayName,
+                curveName = curve.Name,
+                publicKey = SigningCurves.ToPublicPoint(publicKey),
+                secretBlob
+            });
+        }
+
+        throw new InvalidOperationException("Could not create a unique signing authority id.");
     }
 
     private static IResult ListOwnSigningAuthorities(HttpRequest httpRequest, ServiceOptions options)
@@ -254,39 +272,47 @@ public static class SigningEndpoints
         });
     }
 
-    private static IResult CreateSignatureCeremony(
+    private static async Task<IResult> CreateSignatureCeremony(
         HttpRequest httpRequest,
         string authorityId,
         SignatureCeremonyCreateRequest request,
         ServiceOptions options)
     {
-        using var connection = Database.OpenConnection(options.DbPath);
-        if (!AuthService.TryGetUser(connection, httpRequest, out var user))
+        AuthenticatedUser user;
+        ContractVersionRow contract;
+        SigningAuthorityRow authority;
+        using (var readConnection = Database.OpenConnection(options.DbPath))
         {
-            return Results.Unauthorized();
-        }
+            if (!AuthService.TryGetUser(readConnection, httpRequest, out user))
+            {
+                return Results.Unauthorized();
+            }
 
-        if (string.IsNullOrWhiteSpace(request.ContractReference))
-        {
-            return Results.BadRequest(new { error = "contractReference must not be empty" });
-        }
+            if (string.IsNullOrWhiteSpace(request.ContractReference))
+            {
+                return Results.BadRequest(new { error = "contractReference must not be empty" });
+            }
 
-        var contractReference = request.ContractReference.Trim();
-        var contract = LoadLatestContractVersion(connection, contractReference);
-        if (contract is null)
-        {
-            return Results.NotFound(new { error = "contract not found" });
-        }
+            var contractReference = request.ContractReference.Trim();
+            var loadedContract = LoadLatestContractVersion(readConnection, contractReference);
+            if (loadedContract is null)
+            {
+                return Results.NotFound(new { error = "contract not found" });
+            }
 
-        if (contract.OwnerUserId != user.Id)
-        {
-            return Results.StatusCode(StatusCodes.Status403Forbidden);
-        }
+            if (loadedContract.OwnerUserId != user.Id)
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
 
-        var authority = LoadAuthority(connection, authorityId);
-        if (authority is null)
-        {
-            return Results.NotFound(new { error = "signing authority not found" });
+            var loadedAuthority = LoadAuthority(readConnection, authorityId);
+            if (loadedAuthority is null)
+            {
+                return Results.NotFound(new { error = "signing authority not found" });
+            }
+
+            contract = loadedContract;
+            authority = loadedAuthority;
         }
 
         var requestedCurveName = string.IsNullOrWhiteSpace(request.CurveName)
@@ -309,43 +335,59 @@ public static class SigningEndpoints
 
         var privateScalar = EcCurve.ParseHex(authority.PrivateScalar);
         var signaturePoint = curve.Multiply(privateScalar, basePoint);
-        var ceremonyId = CreateUniquePublicId(connection, "SGC-");
-        var receiptTag = ComputeReceiptTag(authorityId, ceremonyId, contract, basePoint, signaturePoint);
 
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO signature_ceremonies
-                (public_id, authority_id, requester_user_id, contract_version_id,
-                 curve_name, base_point_x, base_point_y, signature_point_x,
-                 signature_point_y, signature_point_infinity, receipt_tag)
-            VALUES
-                ($public_id, $authority_id, $requester_user_id, $contract_version_id,
-                 $curve_name, $base_point_x, $base_point_y, $signature_point_x,
-                 $signature_point_y, $signature_point_infinity, $receipt_tag);
-            """;
-        Database.AddParameter(command, "$public_id", ceremonyId);
-        Database.AddParameter(command, "$authority_id", authority.Id);
-        Database.AddParameter(command, "$requester_user_id", user.Id);
-        Database.AddParameter(command, "$contract_version_id", contract.Id);
-        Database.AddParameter(command, "$curve_name", curve.Name);
-        Database.AddParameter(command, "$base_point_x", EcCurve.ToHex(basePoint.X));
-        Database.AddParameter(command, "$base_point_y", EcCurve.ToHex(basePoint.Y));
-        Database.AddParameter(command, "$signature_point_x", signaturePoint.IsInfinity ? null : EcCurve.ToHex(signaturePoint.X));
-        Database.AddParameter(command, "$signature_point_y", signaturePoint.IsInfinity ? null : EcCurve.ToHex(signaturePoint.Y));
-        Database.AddParameter(command, "$signature_point_infinity", signaturePoint.IsInfinity ? 1 : 0);
-        Database.AddParameter(command, "$receipt_tag", receiptTag);
-        command.ExecuteNonQuery();
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            var ceremonyId = SigningSecretBox.CreatePublicId("SGC-");
+            var receiptTag = ComputeReceiptTag(authorityId, ceremonyId, contract, basePoint, signaturePoint);
 
-        return Results.Created($"/api/signing/ceremonies/{Uri.EscapeDataString(ceremonyId)}", ToCeremonyResponse(
-            ceremonyId,
-            authority.PublicId,
-            user.Username,
-            contract,
-            curve.Name,
-            basePoint,
-            signaturePoint,
-            receiptTag,
-            "pending"));
+            using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
+            using var connection = Database.OpenConnection(options.DbPath);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO signature_ceremonies
+                    (public_id, authority_id, requester_user_id, contract_version_id,
+                     curve_name, base_point_x, base_point_y, signature_point_x,
+                     signature_point_y, signature_point_infinity, receipt_tag)
+                VALUES
+                    ($public_id, $authority_id, $requester_user_id, $contract_version_id,
+                     $curve_name, $base_point_x, $base_point_y, $signature_point_x,
+                     $signature_point_y, $signature_point_infinity, $receipt_tag);
+                """;
+            Database.AddParameter(command, "$public_id", ceremonyId);
+            Database.AddParameter(command, "$authority_id", authority.Id);
+            Database.AddParameter(command, "$requester_user_id", user.Id);
+            Database.AddParameter(command, "$contract_version_id", contract.Id);
+            Database.AddParameter(command, "$curve_name", curve.Name);
+            Database.AddParameter(command, "$base_point_x", EcCurve.ToHex(basePoint.X));
+            Database.AddParameter(command, "$base_point_y", EcCurve.ToHex(basePoint.Y));
+            Database.AddParameter(command, "$signature_point_x", signaturePoint.IsInfinity ? null : EcCurve.ToHex(signaturePoint.X));
+            Database.AddParameter(command, "$signature_point_y", signaturePoint.IsInfinity ? null : EcCurve.ToHex(signaturePoint.Y));
+            Database.AddParameter(command, "$signature_point_infinity", signaturePoint.IsInfinity ? 1 : 0);
+            Database.AddParameter(command, "$receipt_tag", receiptTag);
+
+            try
+            {
+                command.ExecuteNonQuery();
+            }
+            catch (SqliteException ex) when (IsUniqueConstraintViolation(ex))
+            {
+                continue;
+            }
+
+            return Results.Created($"/api/signing/ceremonies/{Uri.EscapeDataString(ceremonyId)}", ToCeremonyResponse(
+                ceremonyId,
+                authority.PublicId,
+                user.Username,
+                contract,
+                curve.Name,
+                basePoint,
+                signaturePoint,
+                receiptTag,
+                "pending"));
+        }
+
+        throw new InvalidOperationException("Could not create a unique signature ceremony id.");
     }
 
     private static IResult GetSignatureCeremony(
@@ -382,26 +424,31 @@ public static class SigningEndpoints
             loaded.ValidationState));
     }
 
-    private static IResult ValidateSignatureCeremony(
+    private static async Task<IResult> ValidateSignatureCeremony(
         HttpRequest httpRequest,
         string ceremonyId,
         ServiceOptions options)
     {
-        using var connection = Database.OpenConnection(options.DbPath);
-        if (!AuthService.TryGetUser(connection, httpRequest, out var user))
+        SignatureCeremonyRow loaded;
+        using (var readConnection = Database.OpenConnection(options.DbPath))
         {
-            return Results.Unauthorized();
-        }
+            if (!AuthService.TryGetUser(readConnection, httpRequest, out var user))
+            {
+                return Results.Unauthorized();
+            }
 
-        var loaded = LoadCeremony(connection, ceremonyId);
-        if (loaded is null)
-        {
-            return Results.NotFound(new { error = "signature ceremony not found" });
-        }
+            var loadedCeremony = LoadCeremony(readConnection, ceremonyId);
+            if (loadedCeremony is null)
+            {
+                return Results.NotFound(new { error = "signature ceremony not found" });
+            }
 
-        if (loaded.RequesterUserId != user.Id && loaded.AuthorityOwnerUserId != user.Id)
-        {
-            return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (loadedCeremony.RequesterUserId != user.Id && loadedCeremony.AuthorityOwnerUserId != user.Id)
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
+            loaded = loadedCeremony;
         }
 
         var valid = false;
@@ -419,8 +466,13 @@ public static class SigningEndpoints
         }
 
         var validationState = valid ? "valid" : "invalid";
-        using (var update = connection.CreateCommand())
+        using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
+        using (var connection = Database.OpenConnection(options.DbPath))
         {
+            using var transaction = connection.BeginTransaction();
+
+            using var update = connection.CreateCommand();
+            update.Transaction = transaction;
             update.CommandText = """
                 UPDATE signature_ceremonies
                 SET validation_state = $validation_state
@@ -429,18 +481,21 @@ public static class SigningEndpoints
             Database.AddParameter(update, "$validation_state", validationState);
             Database.AddParameter(update, "$public_id", ceremonyId);
             update.ExecuteNonQuery();
-        }
 
-        if (valid)
-        {
-            using var updateContract = connection.CreateCommand();
-            updateContract.CommandText = """
-                UPDATE contract_versions
-                SET approval_state = 'signed'
-                WHERE id = $contract_version_id;
-                """;
-            Database.AddParameter(updateContract, "$contract_version_id", loaded.Contract.Id);
-            updateContract.ExecuteNonQuery();
+            if (valid)
+            {
+                using var updateContract = connection.CreateCommand();
+                updateContract.Transaction = transaction;
+                updateContract.CommandText = """
+                    UPDATE contract_versions
+                    SET approval_state = 'signed'
+                    WHERE id = $contract_version_id;
+                    """;
+                Database.AddParameter(updateContract, "$contract_version_id", loaded.Contract.Id);
+                updateContract.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
         }
 
         return Results.Ok(new
@@ -686,32 +741,6 @@ public static class SigningEndpoints
             reader.GetString(19));
     }
 
-    private static string CreateUniquePublicId(SqliteConnection connection, string prefix)
-    {
-        for (var attempt = 0; attempt < 16; attempt++)
-        {
-            var publicId = SigningSecretBox.CreatePublicId(prefix);
-            using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT 1
-                FROM signing_authorities
-                WHERE public_id = $public_id
-                UNION
-                SELECT 1
-                FROM signature_ceremonies
-                WHERE public_id = $public_id
-                LIMIT 1;
-                """;
-            Database.AddParameter(command, "$public_id", publicId);
-            if (command.ExecuteScalar() is null)
-            {
-                return publicId;
-            }
-        }
-
-        throw new InvalidOperationException("Could not create a unique signing id.");
-    }
-
     private static string ComputeReceiptTag(
         string authorityId,
         string ceremonyId,
@@ -731,6 +760,11 @@ public static class SigningEndpoints
     {
         return left.IsInfinity == right.IsInfinity
             && (left.IsInfinity || (left.X == right.X && left.Y == right.Y));
+    }
+
+    private static bool IsUniqueConstraintViolation(SqliteException exception)
+    {
+        return exception.SqliteExtendedErrorCode == 2067;
     }
 
     private sealed record SigningAuthorityRow(

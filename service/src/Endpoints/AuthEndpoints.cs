@@ -10,12 +10,17 @@ public static class AuthEndpoints
 {
     public static void MapAuthEndpoints(this WebApplication app, ServiceOptions options)
     {
-        app.MapPost("/api/register", (RegisterRequest request) => Register(request, options));
-        app.MapPost("/api/login", (LoginRequest request) => Login(request, options));
+        app.MapPost("/api/register", async (HttpRequest httpRequest, RegisterRequest request) =>
+            await Register(httpRequest, request, options));
+        app.MapPost("/api/login", async (HttpRequest httpRequest, LoginRequest request) =>
+            await Login(httpRequest, request, options));
         app.MapGet("/api/me", (HttpRequest httpRequest) => Me(httpRequest, options));
     }
 
-    private static IResult Register(RegisterRequest request, ServiceOptions options)
+    private static async Task<IResult> Register(
+        HttpRequest httpRequest,
+        RegisterRequest request,
+        ServiceOptions options)
     {
         var validationError = AuthService.ValidateCredentials(request.Username, request.Password);
         if (validationError is not null)
@@ -23,6 +28,10 @@ public static class AuthEndpoints
             return Results.BadRequest(new { error = validationError });
         }
 
+        var username = request.Username.Trim();
+        var passwordHash = Hashing.HashPassword(request.Password);
+
+        using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
         using var connection = Database.OpenConnection(options.DbPath);
 
         try
@@ -33,8 +42,8 @@ public static class AuthEndpoints
                 VALUES ($username, $password_hash);
                 SELECT last_insert_rowid();
                 """;
-            Database.AddParameter(insertUser, "$username", request.Username.Trim());
-            Database.AddParameter(insertUser, "$password_hash", Hashing.HashPassword(request.Password));
+            Database.AddParameter(insertUser, "$username", username);
+            Database.AddParameter(insertUser, "$password_hash", passwordHash);
 
             var userId = Convert.ToInt64(insertUser.ExecuteScalar());
             var token = AuthService.CreateSession(connection, userId);
@@ -42,7 +51,7 @@ public static class AuthEndpoints
             return Results.Ok(new
             {
                 userId,
-                username = request.Username.Trim(),
+                username,
                 token
             });
         }
@@ -52,25 +61,29 @@ public static class AuthEndpoints
         }
     }
 
-    private static IResult Login(LoginRequest request, ServiceOptions options)
+    private static async Task<IResult> Login(
+        HttpRequest httpRequest,
+        LoginRequest request,
+        ServiceOptions options)
     {
-        using var connection = Database.OpenConnection(options.DbPath);
-
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT id, username, password_hash
-            FROM users
-            WHERE username = $username
-            LIMIT 1;
-            """;
-        Database.AddParameter(command, "$username", request.Username.Trim());
+        var requestedUsername = request.Username.Trim();
 
         long userId;
         string username;
         string expectedPasswordHash;
 
-        using (var reader = command.ExecuteReader())
+        using (var readConnection = Database.OpenConnection(options.DbPath))
         {
+            using var command = readConnection.CreateCommand();
+            command.CommandText = """
+                SELECT id, username, password_hash
+                FROM users
+                WHERE username = $username
+                LIMIT 1;
+                """;
+            Database.AddParameter(command, "$username", requestedUsername);
+
+            using var reader = command.ExecuteReader();
             if (!reader.Read())
             {
                 return Results.Unauthorized();
@@ -86,6 +99,13 @@ public static class AuthEndpoints
             return Results.Unauthorized();
         }
 
+        var upgradedPasswordHash = needsUpgrade
+            ? Hashing.HashPassword(request.Password)
+            : null;
+
+        using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
+        using var connection = Database.OpenConnection(options.DbPath);
+
         if (needsUpgrade)
         {
             using var upgrade = connection.CreateCommand();
@@ -94,7 +114,7 @@ public static class AuthEndpoints
                 SET password_hash = $password_hash
                 WHERE id = $id;
                 """;
-            Database.AddParameter(upgrade, "$password_hash", Hashing.HashPassword(request.Password));
+            Database.AddParameter(upgrade, "$password_hash", upgradedPasswordHash);
             Database.AddParameter(upgrade, "$id", userId);
             upgrade.ExecuteNonQuery();
         }

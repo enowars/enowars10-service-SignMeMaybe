@@ -35,7 +35,7 @@ public static class Hashing
 
         if (TryVerifyPbkdf2(password, storedHash, out var storedIterations))
         {
-            needsUpgrade = storedIterations != GetPbkdf2Iterations();
+            needsUpgrade = storedIterations < GetPbkdf2Iterations();
             return true;
         }
 

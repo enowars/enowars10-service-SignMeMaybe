@@ -99,6 +99,18 @@ public static class ContractEndpoints
 
         try
         {
+            Directory.CreateDirectory(options.PdfRoot);
+            storedFilePath = Path.Combine(options.PdfRoot, $"{Guid.NewGuid():N}.pdf");
+            File.WriteAllBytes(storedFilePath, pdfBytes);
+
+            if (archivePacketBytes is { Length: > 0 })
+            {
+                Directory.CreateDirectory(options.PacketRoot);
+                archivePacketFilePath = CreateArchivePacketPath(options.PacketRoot);
+                File.WriteAllBytes(archivePacketFilePath, archivePacketBytes);
+            }
+
+            using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
             using var connection = Database.OpenConnection(options.DbPath);
             using var transaction = connection.BeginTransaction();
 
@@ -125,10 +137,7 @@ public static class ContractEndpoints
 
             if (archivePacketBytes is { Length: > 0 })
             {
-                Directory.CreateDirectory(options.PacketRoot);
                 archiveTicket = CreateUniqueArchiveTicket(connection, transaction);
-                archivePacketFilePath = CreateArchivePacketPath(options.PacketRoot);
-                File.WriteAllBytes(archivePacketFilePath, archivePacketBytes);
 
                 using var insertPacket = connection.CreateCommand();
                 insertPacket.Transaction = transaction;
@@ -146,10 +155,6 @@ public static class ContractEndpoints
                 Database.AddParameter(insertPacket, "$checksum", archivePacketChecksum);
                 insertPacket.ExecuteNonQuery();
             }
-
-            var storedFileName = $"{reference}-{Guid.NewGuid():N}.pdf";
-            storedFilePath = Path.Combine(options.PdfRoot, storedFileName);
-            File.WriteAllBytes(storedFilePath, pdfBytes);
 
             using var insertVersion = connection.CreateCommand();
             insertVersion.Transaction = transaction;
@@ -264,6 +269,7 @@ public static class ContractEndpoints
             storedFilePath = Path.Combine(options.PdfRoot, storedFileName);
             File.WriteAllBytes(storedFilePath, pdfBytes);
 
+            using var writeLease = await DatabaseWriteGate.EnterAsync(httpRequest.HttpContext.RequestAborted);
             using var connection = Database.OpenConnection(options.DbPath);
             using var transaction = connection.BeginTransaction();
 

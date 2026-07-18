@@ -72,6 +72,24 @@ app.Use(async (context, next) =>
     {
         await next();
     }
+    catch (SqliteException ex) when (Database.IsBusyOrLocked(ex))
+    {
+        Console.WriteLine(
+            "database busy: " +
+            $"method={context.Request.Method} " +
+            $"path={context.Request.Path} " +
+            $"sqliteCode={ex.SqliteErrorCode} " +
+            $"sqliteExtendedCode={ex.SqliteExtendedErrorCode}");
+
+        if (context.Response.HasStarted)
+        {
+            throw;
+        }
+
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new { error = "database busy" });
+    }
     finally
     {
         stopwatch.Stop();
