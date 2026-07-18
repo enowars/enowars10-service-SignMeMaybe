@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 import os
@@ -7,7 +6,9 @@ import re
 import string
 from logging import LoggerAdapter
 from typing import Any, Optional
-from urllib import error, parse, request
+from urllib import parse
+
+import httpx
 
 from enochecker3 import (
     ChainDB,
@@ -141,16 +142,6 @@ class HttpClient:
         body: JsonObject | None = None,
         token: str | None = None,
     ) -> tuple[int, Any]:
-        return await asyncio.to_thread(self._request_json_sync, method, path, body, token)
-
-    def _request_json_sync(
-        self,
-        method: str,
-        path: str,
-        body: JsonObject | None,
-        token: str | None,
-    ) -> tuple[int, Any]:
-        url = self.base_url + path
         data: bytes | None = None
         headers: dict[str, str] = {"Accept": "application/json"}
 
@@ -161,17 +152,8 @@ class HttpClient:
         if token is not None:
             headers["X-Session-Token"] = token
 
-        req = request.Request(url, data=data, headers=headers, method=method)
-        self.logger.debug("Sending %s %s", method, path)
-
-        try:
-            with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                return resp.status, self._decode_response(resp.read())
-        except error.HTTPError as exc:
-            return exc.code, self._decode_response(exc.read())
-        except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            self.logger.debug("Connection to service failed: %r", exc)
-            raise OfflineException("Could not connect to service") from exc
+        status, raw, _response_headers = await self._request_raw(method, path, headers, data)
+        return status, self._decode_response(raw)
 
     async def request_bytes(
         self,
@@ -179,33 +161,43 @@ class HttpClient:
         path: str,
         token: str | None = None,
     ) -> tuple[int, bytes, dict[str, str]]:
-        return await asyncio.to_thread(self._request_bytes_sync, method, path, token)
-
-    def _request_bytes_sync(
-        self,
-        method: str,
-        path: str,
-        token: str | None,
-    ) -> tuple[int, bytes, dict[str, str]]:
-        url = self.base_url + path
         headers: dict[str, str] = {"Accept": "application/pdf, application/octet-stream"}
 
         if token is not None:
             headers["X-Session-Token"] = token
 
-        req = request.Request(url, headers=headers, method=method)
+        return await self._request_raw(method, path, headers)
+
+    async def _request_raw(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        url = self.base_url + path
         self.logger.debug("Sending %s %s", method, path)
 
+        response: httpx.Response | None = None
         try:
-            with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-                response_headers = {key.lower(): value for key, value in resp.headers.items()}
-                return resp.status, resp.read(), response_headers
-        except error.HTTPError as exc:
-            response_headers = {key.lower(): value for key, value in exc.headers.items()}
-            return exc.code, exc.read(), response_headers
-        except (error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            ) as client:
+                async with client.stream(method, url, content=body, headers=headers) as response:
+                    raw = await response.aread()
+                    return response.status_code, raw, self._response_headers(response)
+        except httpx.HTTPError as exc:
+            if response is not None and response.status_code >= 400:
+                self.logger.debug("Could not read HTTP error response body: %r", exc)
+                return response.status_code, b"", self._response_headers(response)
+
             self.logger.debug("Connection to service failed: %r", exc)
             raise OfflineException("Could not connect to service") from exc
+
+    @staticmethod
+    def _response_headers(response: httpx.Response) -> dict[str, str]:
+        return {key.lower(): value for key, value in response.headers.items()}
 
     @staticmethod
     def _decode_response(raw: bytes) -> Any:
