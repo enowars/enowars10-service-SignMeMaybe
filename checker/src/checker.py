@@ -104,7 +104,7 @@ def random_suffix(length: int = 16) -> str:
 
 
 def random_username() -> str:
-    return f"{random.choice(NAME_PARTS)}_{random.choice(HANDLE_PARTS)}_{random.randint(10000, 99999)}"
+    return f"{random.choice(NAME_PARTS)}_{random.choice(HANDLE_PARTS)}_{random_suffix(16)}"
 
 
 def random_password() -> str:
