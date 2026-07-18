@@ -319,6 +319,23 @@ class HttpClient:
 
         return [contract for contract in contracts if isinstance(contract, dict)]
 
+    async def update_contract(
+        self,
+        token: str | None,
+        reference: str,
+        title: str,
+        content: str,
+    ) -> tuple[int, Any]:
+        return await self.request_json(
+            "PUT",
+            f"/api/contracts/{reference}",
+            {
+                "title": title,
+                "content": content,
+            },
+            token=token,
+        )
+
     async def public_contracts_by_username(self, username: str) -> tuple[int, Any]:
         return await self.request_json(
             "GET",
@@ -388,6 +405,9 @@ class HttpClient:
 
         return [authority for authority in authorities if isinstance(authority, dict)]
 
+    async def signing_curves(self) -> tuple[int, Any]:
+        return await self.request_json("GET", "/api/signing/curves")
+
     async def public_signing_authorities_by_username(self, username: str) -> tuple[int, Any]:
         return await self.request_json(
             "GET",
@@ -433,6 +453,13 @@ class HttpClient:
             token=token,
         )
 
+    async def signature_ceremony(self, token: str | None, ceremony_id: str) -> tuple[int, Any]:
+        return await self.request_json(
+            "GET",
+            f"/api/signing/ceremonies/{ceremony_id}",
+            token=token,
+        )
+
 
 def make_client(task: Any, logger: LoggerAdapter) -> HttpClient:
     return HttpClient(service_base_url(task), logger)
@@ -443,6 +470,11 @@ def get_string_field(data: JsonObject, key: str, context: str) -> str:
     if not isinstance(value, str):
         raise MumbleException(f"{context} did not contain a valid {key}")
     return value
+
+
+def assert_status(status: int, expected: int, context: str) -> None:
+    if status != expected:
+        raise MumbleException(f"{context}: expected HTTP {expected}, got HTTP {status}")
 
 
 def is_pdf_literal_ascii(value: str) -> bool:
@@ -1114,7 +1146,7 @@ async def getflag_signing_authority(
 
 
 @checker.putnoise(0)
-async def putnoise_contract(
+async def putnoise_auth_session(
     task: PutnoiseCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -1123,44 +1155,22 @@ async def putnoise_contract(
 
     username = random_username()
     password = random_password()
-    title = "Reference Contract " + random_suffix(12)
-    content = "Noise contract body " + random_suffix(36)
 
     logger.debug("Registering noise user")
-    _user_id, _username, token = await client.register_user(username, password)
-
-    logger.debug("Checking current noise user session")
-    status, data = await client.current_user(token)
-    if status != 200:
-        raise MumbleException(f"Could not retrieve current noise user: HTTP {status}")
-    data_obj = require_json_object(data, "current noise user response")
-    assert_equals(data_obj.get("username"), username, "Current noise user was incorrect")
-
-    logger.debug("Creating noise contract")
-    created = await client.create_contract(token, title, content)
-    reference = get_string_field(created, "reference", "contract creation response")
-    checksum = get_string_field(created, "checksum", "contract creation response")
-
-    logger.debug("Checking that the noise contract is present in the owner's list")
-    contracts = await client.list_contracts(token)
-    listed_references = [contract.get("reference") for contract in contracts]
-    assert_in(reference, listed_references, "Created noise contract was not visible in the owner's list")
+    user_id, _username, _token = await client.register_user(username, password)
 
     await db.set(
-        "noise_contract",
+        "noise_auth_session",
         {
             "username": username,
             "password": password,
-            "title": title,
-            "content": content,
-            "reference": reference,
-            "checksum": checksum,
+            "userId": user_id,
         },
     )
 
 
 @checker.getnoise(0)
-async def getnoise_contract(
+async def getnoise_auth_session(
     task: GetnoiseCheckerTaskMessage,
     db: ChainDB,
     logger: LoggerAdapter,
@@ -1168,75 +1178,349 @@ async def getnoise_contract(
     client = make_client(task, logger)
 
     try:
-        stored = await db.get("noise_contract")
+        stored = await db.get("noise_auth_session")
         username = stored["username"]
         password = stored["password"]
-        title = stored["title"]
-        content = stored["content"]
-        reference = stored["reference"]
-        checksum = stored["checksum"]
+        user_id = stored["userId"]
     except (KeyError, TypeError) as exc:
         raise MumbleException(
             "Missing or broken database entry from putnoise; the previous putnoise likely failed "
             "before storing checker state"
         ) from exc
 
-    logger.debug("Logging in as the noise owner")
-    _user_id, _username, token = await client.login_user(username, password)
+    logger.debug("Logging in as the noise user")
+    logged_in_user_id, _username, token = await client.login_user(username, password)
+    assert_equals(logged_in_user_id, user_id, "Logged-in noise user id was incorrect")
 
     logger.debug("Checking current noise user after login")
     status, data = await client.current_user(token)
     if status != 200:
         raise MumbleException(f"Could not retrieve logged-in noise user: HTTP {status}")
     data_obj = require_json_object(data, "logged-in noise user response")
-    assert_equals(data_obj.get("username"), username, "Logged-in noise user was incorrect")
+    assert_equals(data_obj.get("id"), user_id, "Logged-in /api/me id was incorrect")
+    assert_equals(data_obj.get("username"), username, "Current noise user was incorrect")
 
-    logger.debug("Checking that the noise contract is still listed")
-    contracts = await client.list_contracts(token)
-    listed_references = [contract.get("reference") for contract in contracts]
-    assert_in(reference, listed_references, "Noise contract was not visible in the owner's list")
 
-    logger.debug("Checking public noise contract metadata")
-    status, data = await client.public_contracts_by_username(username)
+@checker.putnoise(1)
+async def putnoise_contract_editing(
+    task: PutnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    username = random_username()
+    password = random_password()
+    original_title = "Draft Contract " + random_suffix(12)
+    original_content = "Original editable contract body " + random_suffix(36)
+    edited_title = "Edited Contract " + random_suffix(12)
+    edited_content = "Edited contract body " + random_suffix(36)
+
+    logger.debug("Registering contract edit noise user")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating editable noise contract")
+    created = await client.create_contract(token, original_title, original_content)
+    reference = get_string_field(created, "reference", "editable contract creation response")
+
+    logger.debug("Editing noise contract")
+    status, data = await client.update_contract(token, reference, edited_title, edited_content)
     if status != 200:
-        raise MumbleException(f"Could not retrieve public noise metadata: HTTP {status}")
-    data_obj = require_json_object(data, "public noise metadata response")
-    assert_equals(data_obj.get("username"), username, "Public noise metadata username was incorrect")
-    public_contracts = data_obj.get("contracts")
-    if not isinstance(public_contracts, list):
-        raise MumbleException("Public noise metadata did not contain a contracts list")
-    public_checksums = []
-    for contract in public_contracts:
-        if not isinstance(contract, dict):
-            continue
-        if "reference" in contract:
-            raise MumbleException("Public noise metadata contained an unexpected record field")
-        public_checksums.append(public_contract_checksum(contract))
-    assert_in(checksum, public_checksums, "Noise contract checksum was not visible in public metadata")
+        raise MumbleException(f"Could not edit noise contract: HTTP {status}")
+    data_obj = require_json_object(data, "editable contract update response")
+    assert_equals(data_obj.get("reference"), reference, "Edited contract reference changed")
+    assert_equals(data_obj.get("versionNumber"), 2, "Edited contract version was incorrect")
+    checksum = get_string_field(data_obj, "checksum", "editable contract update response")
+    assert_equals(data_obj.get("title"), edited_title, "Edited contract title was incorrect")
 
-    logger.debug("Retrieving noise contract")
-    status, data = await client.latest_contract_version(token, reference)
-
-    if status != 200:
-        raise MumbleException(f"Could not retrieve stored noise contract: HTTP {status}")
-
-    data_obj = require_json_object(data, "latest noise contract response")
-    assert_equals(data_obj.get("title"), title, "Stored noise contract title was incorrect")
-    assert_equals(
-        get_string_field(data_obj, "content", "latest noise contract response"),
-        content,
-        "Stored noise contract content was incorrect",
+    await db.set(
+        "noise_contract_edit",
+        {
+            "username": username,
+            "password": password,
+            "reference": reference,
+            "originalContent": original_content,
+            "editedTitle": edited_title,
+            "editedContent": edited_content,
+            "editedChecksum": checksum,
+        },
     )
 
-    logger.debug("Retrieving noise contract PDF")
-    status, pdf_bytes, headers = await client.latest_contract_pdf(token, reference)
+
+@checker.getnoise(1)
+async def getnoise_contract_editing(
+    task: GetnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    try:
+        stored = await db.get("noise_contract_edit")
+        username = stored["username"]
+        password = stored["password"]
+        reference = stored["reference"]
+        original_content = stored["originalContent"]
+        edited_title = stored["editedTitle"]
+        edited_content = stored["editedContent"]
+        edited_checksum = stored["editedChecksum"]
+    except (KeyError, TypeError) as exc:
+        raise MumbleException(
+            "Missing or broken database entry from putnoise; the previous putnoise likely failed "
+            "before storing checker state"
+        ) from exc
+
+    logger.debug("Logging in as the contract edit noise user")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Retrieving edited noise contract")
+    status, data = await client.latest_contract_version(token, reference)
     if status != 200:
-        raise MumbleException(f"Could not retrieve stored noise contract PDF: HTTP {status}")
-    content_type = headers.get("content-type", "").lower()
-    if "application/pdf" not in content_type:
-        raise MumbleException("Stored noise contract PDF had the wrong content type")
-    if not pdf_bytes.startswith(b"%PDF-"):
-        raise MumbleException("Stored noise contract PDF was not a valid PDF")
+        raise MumbleException(f"Could not retrieve edited noise contract: HTTP {status}")
+    data_obj = require_json_object(data, "edited contract latest response")
+    assert_equals(data_obj.get("reference"), reference, "Edited contract reference was not stable")
+    assert_equals(data_obj.get("versionNumber"), 2, "Edited contract latest version was incorrect")
+    assert_equals(data_obj.get("title"), edited_title, "Edited contract latest title was incorrect")
+    assert_equals(
+        get_string_field(data_obj, "content", "edited contract latest response"),
+        edited_content,
+        "Edited contract latest content was incorrect",
+    )
+    assert_equals(data_obj.get("checksum"), edited_checksum, "Edited contract latest checksum was incorrect")
+    if original_content in json.dumps(data_obj, ensure_ascii=False):
+        raise MumbleException("Original contract content was still visible after edit")
+
+    logger.debug("Checking public edited contract metadata")
+    status, public_data = await client.public_contracts_by_username(username)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve public edited contract metadata: HTTP {status}")
+    public_obj = require_json_object(public_data, "public edited contract metadata response")
+    assert_equals(public_obj.get("username"), username, "Public edited metadata username was incorrect")
+    public_contracts = public_obj.get("contracts")
+    if not isinstance(public_contracts, list):
+        raise MumbleException("Public edited metadata did not contain a contracts list")
+
+    matching_public_contracts = [
+        contract for contract in public_contracts
+        if isinstance(contract, dict)
+        and contract.get("title") == edited_title
+        and isinstance(contract.get("latestVersion"), dict)
+        and contract["latestVersion"].get("versionNumber") == 2
+        and normalize_checksum(contract["latestVersion"].get("checksum")) == edited_checksum
+    ]
+    if not matching_public_contracts:
+        raise MumbleException("Edited contract latest version was missing from public metadata")
+
+
+@checker.putnoise(2)
+async def putnoise_archive_packet_edges(
+    task: PutnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    username = random_username()
+    password = random_password()
+    no_packet_title = "Plain Packet Check " + random_suffix(12)
+    no_packet_content = "Plain contract without archive packet " + random_suffix(36)
+    packet_title = "Packet Edge Check " + random_suffix(12)
+    packet_content = "Packet contract public body " + random_suffix(36)
+    archive_packet = "harmless archive packet " + random_suffix(36)
+
+    logger.debug("Registering archive packet edge noise user")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating no-packet noise contract")
+    no_packet = await client.create_contract(token, no_packet_title, no_packet_content)
+    no_packet_reference = get_string_field(no_packet, "reference", "no-packet contract creation response")
+
+    logger.debug("Creating packet noise contract")
+    packet = await client.create_contract(token, packet_title, packet_content, archive_packet=archive_packet)
+    packet_reference = get_string_field(packet, "reference", "packet contract creation response")
+
+    await db.set(
+        "noise_archive_packet_edges",
+        {
+            "username": username,
+            "password": password,
+            "noPacketReference": no_packet_reference,
+            "packetReference": packet_reference,
+            "archivePacket": archive_packet,
+        },
+    )
+
+
+@checker.getnoise(2)
+async def getnoise_archive_packet_edges(
+    task: GetnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    try:
+        stored = await db.get("noise_archive_packet_edges")
+        username = stored["username"]
+        password = stored["password"]
+        no_packet_reference = stored["noPacketReference"]
+        packet_reference = stored["packetReference"]
+        archive_packet = stored["archivePacket"]
+    except (KeyError, TypeError) as exc:
+        raise MumbleException(
+            "Missing or broken database entry from putnoise; the previous putnoise likely failed "
+            "before storing checker state"
+        ) from exc
+
+    logger.debug("Logging in as archive packet edge owner")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Retrieving owner archive packet")
+    status, packet_bytes, _headers = await client.archive_packet(token, packet_reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve owner archive packet: HTTP {status}")
+    if packet_bytes != archive_packet.encode("utf-8"):
+        raise MumbleException("Owner archive packet content was incorrect")
+
+    logger.debug("Checking no-packet contract returns not found for packet retrieval")
+    status, _packet_bytes, _headers = await client.archive_packet(token, no_packet_reference)
+    if status != 404:
+        raise MumbleException(f"No-packet contract archive lookup did not return not found: HTTP {status}")
+
+    logger.debug("Checking different logged-in user cannot fetch archive packet")
+    other_username = random_username()
+    other_password = random_password()
+    _other_user_id, _other_username, other_token = await client.register_user(other_username, other_password)
+    status, _packet_bytes, _headers = await client.archive_packet(other_token, packet_reference)
+    if status != 403:
+        raise MumbleException(f"Different user archive packet lookup was not forbidden: HTTP {status}")
+
+
+@checker.putnoise(3)
+async def putnoise_signing_state(
+    task: PutnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    username = random_username()
+    password = random_password()
+    title = "Signing State Contract " + random_suffix(12)
+    content = "Signing state public contract body " + random_suffix(36)
+    display_name = "Signing State Authority " + random_suffix(12)
+
+    logger.debug("Registering signing state noise user")
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Creating harmless signing state contract")
+    created = await client.create_contract(token, title, content)
+    reference = get_string_field(created, "reference", "signing state contract creation response")
+    checksum = get_string_field(created, "checksum", "signing state contract creation response")
+
+    logger.debug("Creating harmless signing state authority")
+    authority = await client.create_signing_authority(token, display_name)
+    authority_id = get_string_field(authority, "authorityId", "signing state authority creation response")
+
+    logger.debug("Creating signing ceremony with default base point")
+    status, ceremony_data = await client.create_signature_ceremony(token, authority_id, reference)
+    if status not in (200, 201):
+        raise MumbleException(f"Could not create signing state ceremony: HTTP {status}")
+    ceremony_obj = require_json_object(ceremony_data, "signing state ceremony response")
+    ceremony_id = get_string_field(ceremony_obj, "ceremonyId", "signing state ceremony response")
+    ceremony_contract = require_json_object(ceremony_obj.get("contract"), "signing state ceremony contract response")
+    assert_equals(ceremony_contract.get("reference"), reference, "Signing state ceremony targeted wrong contract")
+
+    logger.debug("Validating signing state ceremony")
+    status, validation_data = await client.validate_signature_ceremony(token, ceremony_id)
+    if status != 200:
+        raise MumbleException(f"Could not validate signing state ceremony: HTTP {status}")
+    validation_obj = require_json_object(validation_data, "signing state validation response")
+    if validation_obj.get("valid") is not True:
+        raise MumbleException("Signing state ceremony did not validate")
+
+    await db.set(
+        "noise_signing_state",
+        {
+            "username": username,
+            "password": password,
+            "title": title,
+            "content": content,
+            "reference": reference,
+            "checksum": checksum,
+            "authorityId": authority_id,
+            "ceremonyId": ceremony_id,
+        },
+    )
+
+
+@checker.getnoise(3)
+async def getnoise_signing_state(
+    task: GetnoiseCheckerTaskMessage,
+    db: ChainDB,
+    logger: LoggerAdapter,
+) -> None:
+    client = make_client(task, logger)
+
+    try:
+        stored = await db.get("noise_signing_state")
+        username = stored["username"]
+        password = stored["password"]
+        title = stored["title"]
+        content = stored["content"]
+        reference = stored["reference"]
+        checksum = stored["checksum"]
+        authority_id = stored["authorityId"]
+        ceremony_id = stored["ceremonyId"]
+    except (KeyError, TypeError) as exc:
+        raise MumbleException(
+            "Missing or broken database entry from putnoise; the previous putnoise likely failed "
+            "before storing checker state"
+        ) from exc
+
+    logger.debug("Logging in as signing state noise user")
+    _user_id, _username, token = await client.login_user(username, password)
+
+    logger.debug("Retrieving stored signing ceremony")
+    status, ceremony_data = await client.signature_ceremony(token, ceremony_id)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve signing state ceremony: HTTP {status}")
+    ceremony_obj = require_json_object(ceremony_data, "stored signing ceremony response")
+    assert_equals(ceremony_obj.get("ceremonyId"), ceremony_id, "Signing state ceremony id was incorrect")
+    assert_equals(ceremony_obj.get("authorityId"), authority_id, "Signing state ceremony authority was incorrect")
+    assert_equals(ceremony_obj.get("validationState"), "valid", "Signing state ceremony validation state was incorrect")
+    ceremony_contract = require_json_object(ceremony_obj.get("contract"), "stored signing ceremony contract response")
+    assert_equals(ceremony_contract.get("reference"), reference, "Signing state ceremony contract was incorrect")
+    assert_equals(ceremony_contract.get("title"), title, "Signing state ceremony contract title was incorrect")
+    assert_equals(ceremony_contract.get("checksum"), checksum, "Signing state ceremony contract checksum was incorrect")
+
+    logger.debug("Re-validating signing state ceremony")
+    status, validation_data = await client.validate_signature_ceremony(token, ceremony_id)
+    if status != 200:
+        raise MumbleException(f"Could not re-validate signing state ceremony: HTTP {status}")
+    validation_obj = require_json_object(validation_data, "signing state revalidation response")
+    if validation_obj.get("valid") is not True:
+        raise MumbleException("Signing state ceremony revalidation was not idempotently valid")
+    assert_equals(validation_obj.get("validationState"), "valid", "Signing state revalidation state was incorrect")
+    validation_contract = require_json_object(validation_obj.get("contract"), "signing state revalidation contract response")
+    assert_equals(validation_contract.get("reference"), reference, "Signing state revalidation contract was incorrect")
+
+    logger.debug("Checking signed contract cannot be edited")
+    status, _data = await client.update_contract(
+        token,
+        reference,
+        title + " Updated",
+        content + " edited after signing",
+    )
+    if status != 409:
+        raise MumbleException(f"Signed contract edit was not rejected: HTTP {status}")
+
+    logger.debug("Checking signed contract state")
+    status, contract_data = await client.latest_contract_version(token, reference)
+    if status != 200:
+        raise MumbleException(f"Could not retrieve signed signing state contract: HTTP {status}")
+    contract_obj = require_json_object(contract_data, "signed signing state contract response")
+    assert_equals(contract_obj.get("approvalState"), "signed", "Signing state contract approval state was incorrect")
 
 
 @checker.havoc(0)
@@ -1251,6 +1535,16 @@ async def havoc_health(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> 
 
     data_obj = require_json_object(data, "health response")
     assert_equals(data_obj.get("status"), "ok", "Health endpoint did not report ok")
+
+    logger.debug("Checking info endpoint")
+    status, data = await client.request_json("GET", "/api/info")
+
+    if status != 200:
+        raise MumbleException(f"Info endpoint returned HTTP {status}")
+
+    data_obj = require_json_object(data, "info response")
+    assert_equals(data_obj.get("service"), "SignMeMaybe", "Info endpoint service was incorrect")
+    assert_equals(data_obj.get("status"), "online", "Info endpoint status was incorrect")
 
 
 @checker.havoc(1)
@@ -1271,6 +1565,31 @@ async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter)
     )
     if status != 401:
         raise MumbleException(f"Unknown-account login was not rejected: HTTP {status}")
+
+    logger.debug("Checking that duplicate registration is rejected")
+    _user_id, _username, token = await client.register_user(username, password)
+    status, _data = await client.request_json(
+        "POST",
+        "/api/register",
+        {
+            "username": username,
+            "password": password,
+        },
+    )
+    if status != 409:
+        raise MumbleException(f"Duplicate registration was not rejected: HTTP {status}")
+
+    logger.debug("Checking that invalid registration input is rejected")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/register",
+        {
+            "username": "x",
+            "password": "tiny",
+        },
+    )
+    if status != 400:
+        raise MumbleException(f"Invalid registration input was not rejected: HTTP {status}")
 
     logger.debug("Checking that /api/me rejects missing authentication")
     status, _data = await client.request_json("GET", "/api/me")
@@ -1294,17 +1613,89 @@ async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter)
     if status != 401:
         raise MumbleException(f"Unauthenticated contract creation was not rejected: HTTP {status}")
 
-    logger.debug("Checking that invalid registration input is rejected")
+    unknown_reference = "CNTR-" + random_suffix(24)
+
+    logger.debug("Checking that contract update rejects missing authentication")
+    status, _data = await client.update_contract(
+        None,
+        unknown_reference,
+        "Rejected Update " + random_suffix(12),
+        "unauthenticated update check " + random_suffix(24),
+    )
+    if status != 401:
+        raise MumbleException(f"Unauthenticated contract update was not rejected: HTTP {status}")
+
+    logger.debug("Checking that latest contract lookup rejects missing authentication")
+    status, _data = await client.request_json(
+        "GET",
+        f"/api/contracts/{unknown_reference}/versions/latest",
+    )
+    if status != 401:
+        raise MumbleException(f"Unauthenticated contract latest lookup was not rejected: HTTP {status}")
+
+    logger.debug("Checking that contract PDF lookup rejects missing authentication")
+    status, _pdf_bytes, _headers = await client.request_bytes(
+        "GET",
+        f"/api/contracts/{unknown_reference}/versions/latest/pdf",
+    )
+    if status != 401:
+        raise MumbleException(f"Unauthenticated contract PDF lookup was not rejected: HTTP {status}")
+
+    logger.debug("Checking that archive packet lookup rejects missing authentication")
+    status, _packet_bytes, _headers = await client.request_bytes(
+        "GET",
+        f"/api/contracts/{unknown_reference}/archive/packet",
+    )
+    if status != 401:
+        raise MumbleException(f"Unauthenticated archive packet lookup was not rejected: HTTP {status}")
+
+    logger.debug("Checking that invalid contract creation input is rejected")
     status, _data = await client.request_json(
         "POST",
-        "/api/register",
+        "/api/contracts",
         {
-            "username": "x",
-            "password": "tiny",
+            "title": "",
+            "content": "invalid create payload " + random_suffix(24),
         },
+        token=token,
     )
     if status != 400:
-        raise MumbleException(f"Invalid registration input was not rejected: HTTP {status}")
+        raise MumbleException(f"Invalid contract creation input was not rejected: HTTP {status}")
+
+    logger.debug("Checking that invalid contract update input is rejected")
+    status, _data = await client.update_contract(
+        token,
+        unknown_reference,
+        "",
+        "invalid update payload " + random_suffix(24),
+    )
+    if status != 400:
+        raise MumbleException(f"Invalid contract update input was not rejected: HTTP {status}")
+
+    logger.debug("Checking that unknown latest contract lookup returns not found")
+    status, _data = await client.latest_contract_version(token, unknown_reference)
+    if status != 404:
+        raise MumbleException(f"Unknown contract latest lookup did not return not found: HTTP {status}")
+
+    logger.debug("Checking that unknown contract PDF lookup returns not found")
+    status, _pdf_bytes, _headers = await client.latest_contract_pdf(token, unknown_reference)
+    if status != 404:
+        raise MumbleException(f"Unknown contract PDF lookup did not return not found: HTTP {status}")
+
+    logger.debug("Checking that unknown contract update returns not found")
+    status, _data = await client.update_contract(
+        token,
+        unknown_reference,
+        "Unknown Update " + random_suffix(12),
+        "unknown update payload " + random_suffix(24),
+    )
+    if status != 404:
+        raise MumbleException(f"Unknown contract update did not return not found: HTTP {status}")
+
+    logger.debug("Checking that unknown archive packet lookup returns not found")
+    status, _packet_bytes, _headers = await client.archive_packet(token, unknown_reference)
+    if status != 404:
+        raise MumbleException(f"Unknown archive packet lookup did not return not found: HTTP {status}")
 
     logger.debug("Checking that an unknown public holder returns not found")
     status, _data = await client.public_contracts_by_username("missing_" + random_suffix(12))
@@ -1315,6 +1706,259 @@ async def havoc_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter)
     status, _data = await client.request_json("GET", "/api/users/%20/contracts")
     if status != 400:
         raise MumbleException(f"Malformed public holder lookup was not rejected: HTTP {status}")
+
+
+@checker.havoc(2)
+async def havoc_signing_rejections(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
+    client = make_client(task, logger)
+
+    logger.debug("Checking public signing curve metadata")
+    status, data = await client.signing_curves()
+    if status != 200:
+        raise MumbleException(f"Signing curves endpoint returned HTTP {status}")
+    data_obj = require_json_object(data, "signing curves response")
+    curves = data_obj.get("curves")
+    if not isinstance(curves, list):
+        raise MumbleException("Signing curves response did not contain a curves list")
+    curve_names = {curve.get("name") for curve in curves if isinstance(curve, dict)}
+    expected_curve_names = {"P-256", "P-384", "brainpoolP256r1", "brainpoolP384r1"}
+    if not expected_curve_names.issubset(curve_names):
+        raise MumbleException("Signing curves response was missing expected named curves")
+
+    unknown_authority = "SIG-" + random_suffix(24)
+    unknown_ceremony = "SGC-" + random_suffix(24)
+
+    logger.debug("Checking signing authority listing rejects missing authentication")
+    status, _data = await client.request_json("GET", "/api/signing/authorities")
+    assert_status(status, 401, "Unauthenticated signing authority listing was not rejected")
+
+    logger.debug("Checking signing authority creation rejects missing authentication")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/signing/authorities",
+        {
+            "displayName": "Rejected Authority " + random_suffix(12),
+            "curveName": SIGNING_CURVE_NAME,
+        },
+    )
+    assert_status(status, 401, "Unauthenticated signing authority creation was not rejected")
+
+    logger.debug("Checking signing secret lookup rejects missing authentication")
+    status, _data = await client.request_json(
+        "GET",
+        f"/api/signing/authorities/{unknown_authority}/secret",
+    )
+    assert_status(status, 401, "Unauthenticated signing secret lookup was not rejected")
+
+    logger.debug("Checking ceremony creation rejects missing authentication")
+    status, _data = await client.request_json(
+        "POST",
+        f"/api/signing/authorities/{unknown_authority}/ceremonies",
+        {
+            "contractReference": "CNTR-" + random_suffix(24),
+            "curveName": SIGNING_CURVE_NAME,
+        },
+    )
+    assert_status(status, 401, "Unauthenticated ceremony creation was not rejected")
+
+    logger.debug("Checking ceremony get rejects missing authentication")
+    status, _data = await client.signature_ceremony(None, unknown_ceremony)
+    assert_status(status, 401, "Unauthenticated ceremony get was not rejected")
+
+    logger.debug("Checking ceremony validation rejects missing authentication")
+    status, _data = await client.request_json(
+        "POST",
+        f"/api/signing/ceremonies/{unknown_ceremony}/validate",
+    )
+    assert_status(status, 401, "Unauthenticated ceremony validation was not rejected")
+
+    username = random_username()
+    password = random_password()
+    _user_id, _username, token = await client.register_user(username, password)
+
+    logger.debug("Checking invalid authority display name is rejected")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/signing/authorities",
+        {
+            "displayName": " ",
+            "curveName": SIGNING_CURVE_NAME,
+        },
+        token=token,
+    )
+    assert_status(status, 400, "Invalid signing authority display name was not rejected")
+
+    logger.debug("Checking unknown signing curve is rejected")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/signing/authorities",
+        {
+            "displayName": "Unknown Curve Authority " + random_suffix(12),
+            "curveName": "P-521",
+        },
+        token=token,
+    )
+    assert_status(status, 400, "Unknown signing curve was not rejected")
+
+    logger.debug("Checking oversized signing secret is rejected")
+    status, _data = await client.request_json(
+        "POST",
+        "/api/signing/authorities",
+        {
+            "displayName": "Oversized Secret Authority " + random_suffix(12),
+            "curveName": SIGNING_CURVE_NAME,
+            "signingSecret": "s" * 4097,
+        },
+        token=token,
+    )
+    assert_status(status, 400, "Oversized signing secret was not rejected")
+
+    logger.debug("Checking empty signing secret lookup returns not found")
+    authority = await client.create_signing_authority(token, "Empty Secret Authority " + random_suffix(12))
+    authority_id = get_string_field(authority, "authorityId", "empty-secret authority creation response")
+    status, _data = await client.signing_secret(token, authority_id)
+    assert_status(status, 404, "Empty signing secret lookup did not return not found")
+
+    logger.debug("Checking unknown public signing user returns not found")
+    status, _data = await client.public_signing_authorities_by_username("missing_" + random_suffix(12))
+    assert_status(status, 404, "Unknown public signing user did not return not found")
+
+    logger.debug("Checking unknown ceremony get returns not found")
+    status, _data = await client.signature_ceremony(token, unknown_ceremony)
+    assert_status(status, 404, "Unknown ceremony get did not return not found")
+
+    logger.debug("Checking unknown ceremony validation returns not found")
+    status, _data = await client.validate_signature_ceremony(token, unknown_ceremony)
+    assert_status(status, 404, "Unknown ceremony validation did not return not found")
+
+    logger.debug("Checking missing contract reference during ceremony creation is rejected")
+    status, _data = await client.create_signature_ceremony(token, authority_id, " ")
+    assert_status(status, 400, "Missing ceremony contract reference was not rejected")
+
+    logger.debug("Checking unknown contract reference during ceremony creation returns not found")
+    status, _data = await client.create_signature_ceremony(token, authority_id, "CNTR-" + random_suffix(24))
+    assert_status(status, 404, "Unknown ceremony contract reference did not return not found")
+
+    logger.debug("Checking ceremony curve mismatch is rejected")
+    contract = await client.create_contract(
+        token,
+        "Curve Mismatch Contract " + random_suffix(12),
+        "curve mismatch public contract body " + random_suffix(36),
+    )
+    reference = get_string_field(contract, "reference", "curve mismatch contract creation response")
+    status, _data = await client.create_signature_ceremony(
+        token,
+        authority_id,
+        reference,
+        curve_name="P-384",
+    )
+    assert_status(status, 400, "Ceremony curve mismatch was not rejected")
+
+
+@checker.havoc(3)
+async def havoc_cross_account_access(task: HavocCheckerTaskMessage, logger: LoggerAdapter) -> None:
+    client = make_client(task, logger)
+
+    owner_username = random_username()
+    owner_password = random_password()
+    _owner_user_id, _owner_username, owner_token = await client.register_user(owner_username, owner_password)
+
+    other_username = random_username()
+    other_password = random_password()
+    _other_user_id, _other_username, other_token = await client.register_user(other_username, other_password)
+
+    unrelated_username = random_username()
+    unrelated_password = random_password()
+    _unrelated_user_id, _unrelated_username, unrelated_token = await client.register_user(
+        unrelated_username,
+        unrelated_password,
+    )
+
+    logger.debug("Creating owner contract with archive packet")
+    owner_contract = await client.create_contract(
+        owner_token,
+        "ACL Contract " + random_suffix(12),
+        "owner access-control contract body " + random_suffix(36),
+        archive_packet="acl archive packet " + random_suffix(36),
+    )
+    owner_reference = get_string_field(owner_contract, "reference", "ACL contract creation response")
+
+    logger.debug("Creating owner signing authority with harmless secret")
+    owner_authority = await client.create_signing_authority(
+        owner_token,
+        "ACL Owner Authority " + random_suffix(12),
+        signing_secret="acl signing note " + random_suffix(36),
+    )
+    owner_authority_id = get_string_field(owner_authority, "authorityId", "ACL owner authority creation response")
+
+    logger.debug("Checking non-owner contract edit is forbidden")
+    status, _data = await client.update_contract(
+        other_token,
+        owner_reference,
+        "Forbidden ACL Update " + random_suffix(12),
+        "non-owner update payload " + random_suffix(24),
+    )
+    assert_status(status, 403, "Non-owner contract edit was not forbidden")
+
+    logger.debug("Checking non-owner packet fetch is forbidden")
+    status, _packet_bytes, _headers = await client.archive_packet(other_token, owner_reference)
+    assert_status(status, 403, "Non-owner archive packet fetch was not forbidden")
+
+    logger.debug("Checking non-owner signing secret lookup is forbidden")
+    status, _data = await client.signing_secret(other_token, owner_authority_id)
+    assert_status(status, 403, "Non-owner signing secret lookup was not forbidden")
+
+    logger.debug("Creating second-user signing authority for ceremony ACL check")
+    other_authority = await client.create_signing_authority(
+        other_token,
+        "ACL Ceremony Authority " + random_suffix(12),
+    )
+    other_authority_id = get_string_field(other_authority, "authorityId", "ACL ceremony authority creation response")
+
+    logger.debug("Creating cross-account ceremony with default base point")
+    status, ceremony_data = await client.create_signature_ceremony(
+        owner_token,
+        other_authority_id,
+        owner_reference,
+    )
+    if status not in (200, 201):
+        raise MumbleException(f"Could not create cross-account ceremony: HTTP {status}")
+    ceremony_obj = require_json_object(ceremony_data, "cross-account ceremony creation response")
+    ceremony_id = get_string_field(ceremony_obj, "ceremonyId", "cross-account ceremony creation response")
+
+    logger.debug("Checking requester can retrieve ceremony")
+    status, data = await client.signature_ceremony(owner_token, ceremony_id)
+    assert_status(status, 200, "Requester ceremony retrieval failed")
+    data_obj = require_json_object(data, "requester ceremony response")
+    assert_equals(data_obj.get("ceremonyId"), ceremony_id, "Requester ceremony id was incorrect")
+
+    logger.debug("Checking authority owner can retrieve ceremony")
+    status, data = await client.signature_ceremony(other_token, ceremony_id)
+    assert_status(status, 200, "Authority owner ceremony retrieval failed")
+    data_obj = require_json_object(data, "authority owner ceremony response")
+    assert_equals(data_obj.get("authorityId"), other_authority_id, "Authority owner ceremony authority was incorrect")
+
+    logger.debug("Checking requester can validate ceremony")
+    status, data = await client.validate_signature_ceremony(owner_token, ceremony_id)
+    assert_status(status, 200, "Requester ceremony validation failed")
+    data_obj = require_json_object(data, "requester ceremony validation response")
+    if data_obj.get("valid") is not True:
+        raise MumbleException("Requester ceremony validation did not report valid")
+
+    logger.debug("Checking authority owner can revalidate ceremony")
+    status, data = await client.validate_signature_ceremony(other_token, ceremony_id)
+    assert_status(status, 200, "Authority owner ceremony validation failed")
+    data_obj = require_json_object(data, "authority owner ceremony validation response")
+    if data_obj.get("valid") is not True:
+        raise MumbleException("Authority owner ceremony validation did not report valid")
+
+    logger.debug("Checking unrelated user cannot retrieve ceremony")
+    status, _data = await client.signature_ceremony(unrelated_token, ceremony_id)
+    assert_status(status, 403, "Unrelated ceremony retrieval was not forbidden")
+
+    logger.debug("Checking unrelated user cannot validate ceremony")
+    status, _data = await client.validate_signature_ceremony(unrelated_token, ceremony_id)
+    assert_status(status, 403, "Unrelated ceremony validation was not forbidden")
 
 
 @checker.exploit(0)
