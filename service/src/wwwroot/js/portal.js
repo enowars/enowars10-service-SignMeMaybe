@@ -48,6 +48,7 @@
     };
 
     let ownerContracts = [];
+    let activeContractReference = "";
 
     function setActiveView(viewName) {
         const knownView = elements.viewPanels.some(panel => panel.dataset.viewPanel === viewName);
@@ -100,6 +101,7 @@
         elements.signingAuthorityList.innerHTML = '<p class="muted">Log in to load signing authorities.</p>';
         elements.ceremonyResult.innerHTML = '<p class="muted">Start a contract signature to inspect and validate the receipt.</p>';
         ownerContracts = [];
+        activeContractReference = "";
         elements.ceremonyContractReference.value = "";
         populateContractPicker();
     }
@@ -387,6 +389,12 @@
                 showMessage(validation.valid ? "Receipt validated." : "Receipt rejected.", !validation.valid);
                 if (validation.valid) {
                     await loadContracts();
+                    const signedReference = validation.contract && validation.contract.reference
+                        ? validation.contract.reference
+                        : "";
+                    if (signedReference && signedReference === activeContractReference) {
+                        await loadContract(signedReference);
+                    }
                 }
                 elements.ceremonyResult.querySelector(".meta-row").innerHTML = `
                     <span><strong>Authority:</strong> ${escapeHtml(validation.authorityId)}</span>
@@ -433,9 +441,11 @@
     async function loadContract(reference) {
         const data = await api(`/api/contracts/${encodeURIComponent(reference)}/versions/latest`);
         const isOwner = data.ownerUsername && data.ownerUsername === localStorage.getItem(userKey);
-        const editButton = isOwner
+        const isSigned = String(data.approvalState || "").toLowerCase() === "signed";
+        const editButton = isOwner && !isSigned
             ? '<button type="button" id="edit-contract-button" class="secondary">Edit</button>'
             : "";
+        activeContractReference = data.reference || reference;
         elements.contractViewer.innerHTML = `
             <h3>${escapeHtml(data.title)}</h3>
             <div class="meta-row">
@@ -445,7 +455,7 @@
                 <span><strong>State:</strong> ${escapeHtml(data.approvalState)}</span>
                 <span><strong>Checksum:</strong> ${escapeHtml(data.checksum)}</span>
             </div>
-            <p class="button-row">
+            <p class="button-row contract-action-row">
                 <button type="button" id="open-pdf-button" class="pdf-link secondary">Open generated PDF</button>
                 ${editButton}
                 <button type="button" id="sign-contract-button" class="secondary">Sign contract</button>
@@ -463,6 +473,11 @@
         const editContractButton = document.getElementById("edit-contract-button");
         if (editContractButton) {
             editContractButton.addEventListener("click", function () {
+                if (String(data.approvalState || "").toLowerCase() === "signed") {
+                    showMessage("Signed contracts cannot be edited.", true);
+                    loadContract(data.reference).catch(error => showMessage(error.message, true));
+                    return;
+                }
                 renderContractEditForm(data);
             });
         }
@@ -475,6 +490,12 @@
     }
 
     function renderContractEditForm(contract) {
+        if (String(contract.approvalState || "").toLowerCase() === "signed") {
+            showMessage("Signed contracts cannot be edited.", true);
+            loadContract(contract.reference).catch(error => showMessage(error.message, true));
+            return;
+        }
+
         elements.contractViewer.innerHTML = `
             <h3>Edit ${escapeHtml(contract.reference)}</h3>
             <form id="contract-edit-form" class="stack">
@@ -510,11 +531,19 @@
     async function saveContractEdit(reference) {
         const title = document.getElementById("edit-contract-title").value.trim();
         const content = document.getElementById("edit-contract-content").value;
-        await api(`/api/contracts/${encodeURIComponent(reference)}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title, content })
-        });
+        try {
+            await api(`/api/contracts/${encodeURIComponent(reference)}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title, content })
+            });
+        } catch (error) {
+            if (/signed contracts cannot be edited/i.test(error.message)) {
+                await loadContracts();
+                await loadContract(reference);
+            }
+            throw error;
+        }
 
         showMessage("Contract updated.", false);
         await loadContracts();
