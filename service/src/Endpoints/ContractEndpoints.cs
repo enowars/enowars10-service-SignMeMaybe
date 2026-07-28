@@ -563,6 +563,7 @@ public static class ContractEndpoints
             JOIN users u ON u.id = c.owner_user_id
             JOIN contract_versions v ON v.contract_id = c.id
             WHERE c.public_reference = $public_reference
+              AND c.owner_user_id = $owner_user_id
               AND v.version_number = (
                   SELECT MAX(version_number)
                   FROM contract_versions
@@ -571,6 +572,7 @@ public static class ContractEndpoints
             LIMIT 1;
             """;
         Database.AddParameter(command, "$public_reference", reference);
+        Database.AddParameter(command, "$owner_user_id", user.Id);
 
         using var reader = command.ExecuteReader();
         if (!reader.Read())
@@ -602,7 +604,7 @@ public static class ContractEndpoints
     {
         using var connection = Database.OpenConnection(options.DbPath);
 
-        if (!AuthService.TryGetUser(connection, httpRequest, out _))
+        if (!AuthService.TryGetUser(connection, httpRequest, out var user))
         {
             return Results.Unauthorized();
         }
@@ -614,6 +616,7 @@ public static class ContractEndpoints
             FROM contracts c
             JOIN contract_versions v ON v.contract_id = c.id
             WHERE c.public_reference = $public_reference
+              AND c.owner_user_id = $owner_user_id
               AND v.version_number = (
                   SELECT MAX(version_number)
                   FROM contract_versions
@@ -622,6 +625,7 @@ public static class ContractEndpoints
             LIMIT 1;
             """;
         Database.AddParameter(command, "$public_reference", reference);
+        Database.AddParameter(command, "$owner_user_id", user.Id);
 
         var storedFilePath = command.ExecuteScalar() as string;
         if (storedFilePath is null || !File.Exists(storedFilePath))

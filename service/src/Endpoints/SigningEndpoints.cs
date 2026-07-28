@@ -333,6 +333,11 @@ public static class SigningEndpoints
             return Results.BadRequest(new { error = pointError });
         }
 
+        if (!curve.IsOnCurve(basePoint))
+        {
+            return Results.BadRequest(new { error = "basePoint must lie on the selected curve" });
+        }
+
         var privateScalar = EcCurve.ParseHex(authority.PrivateScalar);
         var signaturePoint = curve.Multiply(privateScalar, basePoint);
 
