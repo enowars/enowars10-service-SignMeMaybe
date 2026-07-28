@@ -5,6 +5,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
+from typing import Awaitable, Callable, TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -59,6 +60,8 @@ except ModuleNotFoundError:
 from checker import HttpClient
 from enochecker3 import OfflineException
 
+T = TypeVar("T")
+
 
 class RawResponseServer(socketserver.TCPServer):
     allow_reuse_address = True
@@ -70,7 +73,7 @@ class RawResponseHandler(socketserver.BaseRequestHandler):
         self.request.sendall(self.server.response)
 
 
-def request_against(response: bytes, call):
+async def request_against(response: bytes, call: Callable[[HttpClient], Awaitable[T]]) -> T:
     with RawResponseServer(("127.0.0.1", 0), RawResponseHandler) as server:
         server.response = response
         thread = threading.Thread(target=server.handle_request, daemon=True)
@@ -79,13 +82,13 @@ def request_against(response: bytes, call):
         logger = logging.LoggerAdapter(logging.getLogger("test"), {})
         client = HttpClient(f"http://127.0.0.1:{server.server_address[1]}", logger)
         try:
-            return call(client)
+            return await call(client)
         finally:
             thread.join(timeout=2)
 
 
-class HttpClientTransportTests(unittest.TestCase):
-    def test_successful_malformed_chunked_response_is_offline(self) -> None:
+class HttpClientTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_malformed_chunked_response_is_offline(self) -> None:
         response = (
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: application/json\r\n"
@@ -96,9 +99,9 @@ class HttpClientTransportTests(unittest.TestCase):
         )
 
         with self.assertRaises(OfflineException):
-            request_against(response, lambda client: client._request_json_sync("GET", "/", None, None))
+            await request_against(response, lambda client: client.request_json("GET", "/"))
 
-    def test_http_error_malformed_chunked_body_keeps_status(self) -> None:
+    async def test_http_error_malformed_chunked_body_keeps_status(self) -> None:
         response = (
             b"HTTP/1.1 404 Not Found\r\n"
             b"Content-Type: application/json\r\n"
@@ -108,9 +111,9 @@ class HttpClientTransportTests(unittest.TestCase):
             b"\x00\x00\x00\x00\x00\r\n"
         )
 
-        status, data = request_against(
+        status, data = await request_against(
             response,
-            lambda client: client._request_json_sync("GET", "/missing", None, None),
+            lambda client: client.request_json("GET", "/missing"),
         )
 
         self.assertEqual(status, 404)
