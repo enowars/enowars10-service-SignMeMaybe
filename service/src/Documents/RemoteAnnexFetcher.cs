@@ -8,10 +8,7 @@ public static class RemoteAnnexFetcher
     private const int MaxAnnexes = 2;
     private const int MaxAnnexBytes = 32 * 1024;
     private const int MaxRedirects = 5;
-    private const string InternalArchivePathPrefix = "/internal/archive/packets/";
     private const string LeavePath = "/api/links/leave";
-    private const string PdfWorkerHeaderName = "X-SignMeMaybe-Pdf-Worker";
-    private const string PdfWorkerHeaderValue = "annex-worker-v2";
     private static readonly TimeSpan FetchTimeout = TimeSpan.FromSeconds(2);
     private static readonly HttpRequestOptionsKey<IPAddress> ApprovedAddressOption = new("SignMeMaybe.ApprovedAnnexAddress");
 
@@ -69,10 +66,6 @@ public static class RemoteAnnexFetcher
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, currentTarget.Uri);
                 request.Options.Set(ApprovedAddressOption, currentTarget.Address);
-                if (currentTarget.IsInternalArchivePacket)
-                {
-                    request.Headers.TryAddWithoutValidation(PdfWorkerHeaderName, PdfWorkerHeaderValue);
-                }
 
                 using var response = await client.SendAsync(
                     request,
@@ -187,7 +180,7 @@ public static class RemoteAnnexFetcher
             return null;
         }
 
-        return new ResolvedAnnexTarget(uri, address, IsInternalArchivePacket: false);
+        return new ResolvedAnnexTarget(uri, address);
     }
 
     private static async Task<ResolvedAnnexTarget?> ResolveRedirectTargetAsync(
@@ -195,25 +188,7 @@ public static class RemoteAnnexFetcher
         string serviceHost,
         CancellationToken cancellationToken)
     {
-        if (IsAllowedInternalArchivePacketUri(uri, serviceHost))
-        {
-            return new ResolvedAnnexTarget(uri, IPAddress.Loopback, IsInternalArchivePacket: true);
-        }
-
         return await ResolveInitialTargetAsync(uri, serviceHost, cancellationToken);
-    }
-
-    private static bool IsAllowedInternalArchivePacketUri(Uri uri, string serviceHost)
-    {
-        var expectedPort = TryParseServicePort(serviceHost);
-        return string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(uri.Host, "127.0.0.1", StringComparison.Ordinal)
-            && uri.Port > 0
-            && (expectedPort is null || uri.Port == expectedPort.Value)
-            && uri.AbsolutePath.StartsWith(InternalArchivePathPrefix, StringComparison.Ordinal)
-            && uri.AbsolutePath.Length > InternalArchivePathPrefix.Length
-            && string.IsNullOrEmpty(uri.Query)
-            && string.IsNullOrEmpty(uri.Fragment);
     }
 
     private static bool IsHttpUri(Uri uri)
@@ -245,17 +220,6 @@ public static class RemoteAnnexFetcher
 
         return string.Equals(uri.Host, serviceUri.Host, StringComparison.OrdinalIgnoreCase)
             && EffectivePort(uri) == EffectivePort(serviceUri);
-    }
-
-    private static int? TryParseServicePort(string serviceHost)
-    {
-        if (string.IsNullOrWhiteSpace(serviceHost)
-            || !Uri.TryCreate("http://" + serviceHost, UriKind.Absolute, out var serviceUri))
-        {
-            return null;
-        }
-
-        return EffectivePort(serviceUri);
     }
 
     private static int EffectivePort(Uri uri)
@@ -440,8 +404,7 @@ public static class RemoteAnnexFetcher
 
     private sealed record ResolvedAnnexTarget(
         Uri Uri,
-        IPAddress Address,
-        bool IsInternalArchivePacket);
+        IPAddress Address);
 
     private static string SafeMimeType(string? value)
     {
