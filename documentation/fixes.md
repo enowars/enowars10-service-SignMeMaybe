@@ -1,6 +1,6 @@
 # Fixes
 
-This page describes intended fixes for a defended or post-competition version of SignMeMaybe. Each fix should preserve legitimate owner workflows and break only the exploit path.
+This page describes the fixes for a defended or post-competition version of SignMeMaybe. The `main` branch keeps the vulnerabilities for the A/D CTF service, while the `fixed` branch already contains these fixes implemented. Each fix should preserve legitimate owner workflows and break only the exploit path.
 
 ## Fix Vuln 0: Enforce Contract Ownership
 
@@ -89,7 +89,7 @@ Regression checks:
 
 ## Documentation And Operations Checks
 
-After applying fixes, update the vulnerability documentation to state which bugs are patched in the deployed branch. Run at least these checks:
+When validating the `fixed` branch or reapplying the fixes elsewhere, run at least these checks:
 
 ```bash
 dotnet build service/src/SignMeMaybe.csproj

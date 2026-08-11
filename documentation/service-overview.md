@@ -2,6 +2,8 @@
 
 SignMeMaybe models a contract office. A user logs in, files contracts, downloads generated PDFs, optionally stores a private archive packet with a contract, and creates signing authorities that can sign contracts through server-side ceremonies.
 
+This documentation describes the `main` branch as the intentionally vulnerable A/D CTF version. The `fixed` branch contains the already implemented defended version with the fixes summarized in [`fixes.md`](fixes.md).
+
 ## Architecture
 
 ```mermaid

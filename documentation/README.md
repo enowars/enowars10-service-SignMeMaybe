@@ -4,6 +4,11 @@ This folder contains the long-form documentation for SignMeMaybe. It is written 
 
 SignMeMaybe is a departmental contract registry built as an ASP.NET Core service. Users create contract records, receive private `CNTR-...` references, publish limited public metadata, generate certified PDFs, attach private archive packets, and create signing authorities for contract signature ceremonies.
 
+## Branches
+
+- `main` is the intentionally vulnerable competition branch. The three vulnerabilities documented here are present there by design.
+- `fixed` is the defended branch. It already contains the intended fixes described in [`fixes.md`](fixes.md).
+
 ## Read This First
 
 - [`service-overview.md`](service-overview.md): how the service, checker, storage, API, and cleanup job work.

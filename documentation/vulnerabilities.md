@@ -2,6 +2,8 @@
 
 SignMeMaybe contains three intentional vulnerabilities. Each vulnerability maps to one checker vuln ID and one flagstore.
 
+These vulnerabilities are present in the `main` branch. The `fixed` branch contains the implemented fixes for them.
+
 | Vuln ID | Name | Flag location | Public clue | Impact |
 | --- | --- | --- | --- | --- |
 | `0` | Metadata-derived IDOR | Contract `content` | Public title and checksum | Read another user's latest contract JSON/PDF |
